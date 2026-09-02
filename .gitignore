@@ -1,0 +1,9 @@
+.DS_Store
+DerivedData/
+build/
+Vendor/dosbox-pure/
+Win95iOS/BundledContent/*.img
+Win95iOS/BundledContent/*.vhd
+Win95iOS/BundledContent/*.iso
+Win95iOS/BundledContent/DOSBOX-*
+!Win95iOS/BundledContent/.gitkeep

@@ -1,0 +1,82 @@
+diff --git a/include/bios_disk.h b/include/bios_disk.h
+index 259dbe0..cf8ef6a 100644
+--- a/include/bios_disk.h
++++ b/include/bios_disk.h
+@@ -62,6 +62,7 @@ public:
+ 	~imageDisk();
+ 	Bit32u Read_Raw(Bit8u *buffer, Bit32u seek, Bit32u len);
+ 	void SetDifferencingDisk(const char* savePath);
++	void FlushDifferencingDisk();
+ 	bool ExportToFile(const char* path, bool vhd_format);
+ 	#else
+ 	imageDisk(FILE *imgFile, const char *imgName, Bit32u imgSizeK, bool isHardDisk);
+diff --git a/src/ints/bios_disk.cpp b/src/ints/bios_disk.cpp
+index a2962b5..1d19fd1 100644
+--- a/src/ints/bios_disk.cpp
++++ b/src/ints/bios_disk.cpp
+@@ -34,6 +34,7 @@
+ #ifdef C_DBP_SUPPORT_DISK_MOUNT_DOSFILE
+ #include <time.h>
+ #include <stdlib.h>
++#include <unistd.h>
+ 
+ struct discardDisk
+ {
+@@ -1338,6 +1339,15 @@ void imageDisk::SetDifferencingDisk(const char* savePath)
+ 	differencing->SetupSave(savePath, heads*cylinders*sectors);
+ }
+ 
++void imageDisk::FlushDifferencingDisk()
++{
++	if (differencing && differencing->saveFile)
++	{
++		fflush(differencing->saveFile);
++		fsync(fileno(differencing->saveFile));
++	}
++}
++
+ bool imageDisk::ExportToFile(const char* path, bool vhd_format)
+ {
+ 	if (sector_size > 512) return false; // unsupported here
+diff --git a/dosbox_pure_run.h b/dosbox_pure_run.h
+index 347c4c7..1e99340 100644
+--- a/dosbox_pure_run.h
++++ b/dosbox_pure_run.h
+@@ -158,8 +158,15 @@ struct DBP_Run
+ 			DBP_Mount(0, false); // make sure something is mounted
+ 
+ 			// If hard disk image was mounted to D:, swap it to be the bootable C: drive
+-			std::swap(imageDiskList['D'-'A'], imageDiskList['C'-'A']);
++			if (imageDiskList['D'-'A'])
++				std::swap(imageDiskList['D'-'A'], imageDiskList['C'-'A']);
++			else if (imageDiskList['E'-'A'])
++				std::swap(imageDiskList['E'-'A'], imageDiskList['C'-'A']);
++
++			// The iOS fixed machine keeps its bundled/imported base image immutable.
++			if (imageDiskList['C'-'A'])
++				imageDiskList['C'-'A']->SetDifferencingDisk(DBP_GetSaveFile(SFT_DIFFDISK).c_str());
+ 
+ 			// If there is no mounted hard disk image but a D: drive, setup the CDROM IDE controller
+ 			if (!imageDiskList['C'-'A'] && Drives['D'-'A'])
+ 				IDE_SetupControllers(true);
+diff --git a/dosbox_pure_libretro.cpp b/dosbox_pure_libretro.cpp
+index 1909302..b913e38 100644
+--- a/dosbox_pure_libretro.cpp
++++ b/dosbox_pure_libretro.cpp
+@@ -3377,6 +3377,16 @@ void retro_reset(void)
+ 		input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)));
+ }
+ 
++extern "C" void dbp_win95_flush_disk(void)
++{
++	if (dbp_state == DBPSTATE_BOOT || dbp_state == DBPSTATE_SHUTDOWN) return;
++	DBP_ThreadControl(TCM_PAUSE_FRAME);
++	for (unsigned i = 0; i != MAX_HDD_IMAGES; ++i)
++		if (imageDiskList[i])
++			imageDiskList[i]->FlushDifferencingDisk();
++	DBP_ThreadControl(TCM_RESUME_FRAME);
++}
++
+ void retro_run_touchpad(bool has_press, Bit16s absx, Bit16s absy)
+ {
+ 	static Bit8u last_presses, down_btn, is_move, is_tap;
