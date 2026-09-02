@@ -123,10 +123,9 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
         return view
     }()
 
-    override var inputAccessoryView: UIView? { accessory }
-
     init() {
         super.init(frame: .zero)
+        inputAccessoryView = accessory
         delegate = self
         autocorrectionType = .no
         autocapitalizationType = .none
