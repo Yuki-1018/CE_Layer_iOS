@@ -5,7 +5,6 @@ import UIKit
 final class VMViewController: UIViewController, UIDocumentPickerDelegate {
     private let displayView = MetalDisplayView()
     private let toolbar = UIStackView()
-    private let statusLabel = UILabel()
     private let keyboardCapture = KeyboardCaptureView()
     private var bridge: Win95CoreBridge!
     private var audio: AudioOutput!
@@ -14,6 +13,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
     private var previousTouch: CGPoint?
     private var pendingImport: ImportKind = .disk
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var activeCDURL: URL?
 
     private enum ImportKind { case disk, cd }
 
@@ -23,6 +23,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
     }()
     private var savesDirectory: URL { supportDirectory.appendingPathComponent("Saves", isDirectory: true) }
     private var systemDirectory: URL { supportDirectory.appendingPathComponent("System", isDirectory: true) }
+    private var cdDirectory: URL { supportDirectory.appendingPathComponent("CDs", isDirectory: true) }
     private var importedDiskURL: URL? {
         for ext in ["img", "vhd"] {
             let url = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(ext)
@@ -39,7 +40,6 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
         bridge = Win95CoreBridge(saveDirectory: savesDirectory, systemDirectory: systemDirectory)
         audio = AudioOutput(bridge: bridge)
         bridge.statusHandler = { [weak self] status in
-            self?.statusLabel.text = status
             if status == "Stopped" { self?.audio.stop() }
         }
         keyboardCapture.sendKey = { [weak self] key, pressed in self?.bridge.sendKey(key, pressed: pressed) }
@@ -54,36 +54,34 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
     deinit { displayLink?.invalidate(); NotificationCenter.default.removeObserver(self) }
 
     override var prefersHomeIndicatorAutoHidden: Bool { true }
+    override var prefersStatusBarHidden: Bool { true }
+    override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .all }
     override var canBecomeFirstResponder: Bool { true }
 
     private func createDirectories() {
         try? FileManager.default.createDirectory(at: savesDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: cdDirectory, withIntermediateDirectories: true)
     }
 
     private func configureUI() {
         displayView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(displayView)
 
-        statusLabel.text = "Stopped"
-        statusLabel.textColor = .white
-        statusLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        statusLabel.textAlignment = .center
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(statusLabel)
-
         toolbar.axis = .horizontal
         toolbar.alignment = .center
         toolbar.distribution = .fillEqually
         toolbar.spacing = 4
         toolbar.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.backgroundColor = UIColor(white: 0.10, alpha: 0.98)
+        toolbar.backgroundColor = UIColor(white: 0.08, alpha: 0.78)
+        toolbar.layer.cornerRadius = 12
+        toolbar.clipsToBounds = true
         view.addSubview(toolbar)
 
         addButton("⌨︎", action: #selector(showKeyboard), hint: "Keyboard")
         addButton("L", action: #selector(leftClick), hint: "Left click")
         addButton("R", action: #selector(rightClick), hint: "Right click")
-        addButton("CD", action: #selector(importCD), hint: "Mount CD image")
+        addButton("CD", action: #selector(showCDMenu), hint: "CD images")
         addButton("Ⅱ", action: #selector(togglePause), hint: "Pause or resume")
         addButton("↻", action: #selector(resetVM), hint: "Reset")
         addButton("•••", action: #selector(showActions), hint: "More")
@@ -93,18 +91,16 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
         NSLayoutConstraint.activate([
             displayView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             displayView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            displayView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            displayView.bottomAnchor.constraint(equalTo: toolbar.topAnchor),
-            toolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            toolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            toolbar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+            displayView.topAnchor.constraint(equalTo: view.topAnchor),
+            displayView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            toolbar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 8),
+            toolbar.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -8),
+            toolbar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -6),
             toolbar.heightAnchor.constraint(equalToConstant: 52),
             keyboardCapture.widthAnchor.constraint(equalToConstant: 1),
             keyboardCapture.heightAnchor.constraint(equalToConstant: 1),
             keyboardCapture.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            keyboardCapture.bottomAnchor.constraint(equalTo: toolbar.topAnchor),
-            statusLabel.centerXAnchor.constraint(equalTo: displayView.centerXAnchor),
-            statusLabel.topAnchor.constraint(equalTo: displayView.topAnchor, constant: 8)
+            keyboardCapture.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(trackpadPan(_:)))
@@ -112,6 +108,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
         displayView.addGestureRecognizer(pan)
         let tap = UITapGestureRecognizer(target: self, action: #selector(leftClick))
         displayView.addGestureRecognizer(tap)
+        let controlsTap = UITapGestureRecognizer(target: self, action: #selector(toggleControls))
+        controlsTap.numberOfTouchesRequired = 2
+        displayView.addGestureRecognizer(controlsTap)
     }
 
     private func addButton(_ title: String, action: Selector, hint: String) {
@@ -144,7 +143,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
     }
 
     private func startVM(disk: URL, state: URL? = nil) {
-        statusLabel.text = "Starting…"
+        activeCDURL = nil
         bridge.start(withDiskURL: disk) { [weak self] error in
             guard let self else { return }
             if let error { self.showError(error); return }
@@ -167,18 +166,23 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
 
     @objc private func importDisk() {
         pendingImport = .disk
-        present(UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: true), animated: true)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: true)
+        picker.delegate = self
+        present(picker, animated: true)
     }
 
     @objc private func importCD() {
         pendingImport = .cd
-        present(UIDocumentPickerViewController(forOpeningContentTypes: [.isoImage, .data], asCopy: true), animated: true)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.isoImage, .data], asCopy: true)
+        picker.delegate = self
+        picker.allowsMultipleSelection = true
+        present(picker, animated: true)
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        guard let source = urls.first else { return }
         switch pendingImport {
         case .disk:
+            guard let source = urls.first else { return }
             let ext = source.pathExtension.lowercased()
             guard ext == "img" || ext == "vhd" else { showError(NSError(domain: "Win95UI", code: 1, userInfo: [NSLocalizedDescriptionKey: "Select a raw .img or .vhd disk image."])); return }
             do {
@@ -196,13 +200,75 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
                 startVM(disk: destination)
             } catch { showError(error) }
         case .cd:
-            let destination = supportDirectory.appendingPathComponent("mounted-cd").appendingPathExtension(source.pathExtension)
             do {
-                if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
-                try FileManager.default.copyItem(at: source, to: destination)
-                bridge.mountCD(at: destination) { [weak self] error in if let error { self?.showError(error) } }
+                var firstMountable: URL?
+                for source in urls {
+                    let destination = uniqueCDDestination(for: source)
+                    try FileManager.default.copyItem(at: source, to: destination)
+                    if firstMountable == nil && isMountableCD(destination) { firstMountable = destination }
+                }
+                if let firstMountable { mountCD(firstMountable) }
             } catch { showError(error) }
         }
+    }
+
+    @objc private func showCDMenu() {
+        let sheet = UIAlertController(title: "CD-ROM", message: "複数のイメージを保存し、実行中に交換できます。", preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "CDイメージを追加…", style: .default) { [weak self] _ in self?.importCD() })
+        for url in storedCDImages {
+            let prefix = activeCDURL == url ? "✓ " : ""
+            sheet.addAction(UIAlertAction(title: prefix + url.lastPathComponent, style: .default) { [weak self] _ in
+                self?.mountCD(url)
+            })
+        }
+        if activeCDURL != nil {
+            sheet.addAction(UIAlertAction(title: "CDを取り出す", style: .destructive) { [weak self] _ in self?.ejectCD() })
+        }
+        sheet.addAction(UIAlertAction(title: "キャンセル", style: .cancel))
+        if let popover = sheet.popoverPresentationController {
+            popover.sourceView = toolbar
+            popover.sourceRect = toolbar.bounds
+        }
+        present(sheet, animated: true)
+    }
+
+    private var storedCDImages: [URL] {
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: cdDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return urls.filter(isMountableCD).sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    private func isMountableCD(_ url: URL) -> Bool {
+        ["iso", "cue", "chd", "img"].contains(url.pathExtension.lowercased())
+    }
+
+    private func uniqueCDDestination(for source: URL) -> URL {
+        let fileManager = FileManager.default
+        let ext = source.pathExtension
+        let base = source.deletingPathExtension().lastPathComponent
+        var destination = cdDirectory.appendingPathComponent(source.lastPathComponent)
+        var suffix = 2
+        while fileManager.fileExists(atPath: destination.path) {
+            destination = cdDirectory.appendingPathComponent("\(base)-\(suffix)")
+            if !ext.isEmpty { destination.appendPathExtension(ext) }
+            suffix += 1
+        }
+        return destination
+    }
+
+    private func mountCD(_ url: URL) {
+        bridge.mountCD(at: url) { [weak self] error in
+            if let error { self?.showError(error) }
+            else { self?.activeCDURL = url }
+        }
+    }
+
+    private func ejectCD() {
+        bridge.ejectCD()
+        activeCDURL = nil
     }
 
     @objc private func showKeyboard() { keyboardCapture.becomeFirstResponder() }
@@ -215,28 +281,15 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
         if !forwardPhysicalKeys(presses, pressed: false) { super.pressesEnded(presses, with: event) }
     }
 
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if !forwardPhysicalKeys(presses, pressed: false) { super.pressesCancelled(presses, with: event) }
+    }
+
     private func forwardPhysicalKeys(_ presses: Set<UIPress>, pressed: Bool) -> Bool {
         var handled = false
         for press in presses {
             guard let key = press.key else { continue }
-            let mapped: UInt32?
-            switch key.keyCode.rawValue {
-            case 40: mapped = RetroKey.enter
-            case 41: mapped = RetroKey.escape
-            case 42: mapped = RetroKey.backspace
-            case 43: mapped = RetroKey.tab
-            case 44: mapped = RetroKey.space
-            case 76: mapped = RetroKey.delete
-            case 79: mapped = RetroKey.right
-            case 80: mapped = RetroKey.left
-            case 81: mapped = RetroKey.down
-            case 82: mapped = RetroKey.up
-            case 224: mapped = RetroKey.leftControl
-            case 225: mapped = RetroKey.leftShift
-            case 226: mapped = RetroKey.leftAlt
-            default:
-                mapped = key.charactersIgnoringModifiers.lowercased().utf8.first.map(UInt32.init)
-            }
+            let mapped = RetroKey.fromHIDUsage(key.keyCode.rawValue)
             if let mapped { bridge.sendKey(mapped, pressed: pressed); handled = true }
         }
         return handled
@@ -252,6 +305,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
 
     @objc private func leftClick() { click(left: true) }
     @objc private func rightClick() { click(left: false) }
+    @objc private func toggleControls() {
+        UIView.animate(withDuration: 0.2) { self.toolbar.alpha = self.toolbar.alpha > 0 ? 0 : 1 }
+    }
 
     private func click(left: Bool) {
         if left { bridge.setLeftMouseButton(true) } else { bridge.setRightMouseButton(true) }
@@ -267,7 +323,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate {
         let sheet = UIAlertController(title: "Windows 95", message: nil, preferredStyle: .actionSheet)
         sheet.addAction(UIAlertAction(title: "Save State", style: .default) { [weak self] _ in self?.saveState() })
         sheet.addAction(UIAlertAction(title: "Load State", style: .default) { [weak self] _ in self?.loadState() })
-        sheet.addAction(UIAlertAction(title: "Eject CD", style: .default) { [weak self] _ in self?.bridge.ejectCD() })
+        sheet.addAction(UIAlertAction(title: "CD Images", style: .default) { [weak self] _ in self?.showCDMenu() })
         sheet.addAction(UIAlertAction(title: "Replace Base Disk", style: .default) { [weak self] _ in self?.replaceDisk() })
         sheet.addAction(UIAlertAction(title: "Reset Windows Data", style: .destructive) { [weak self] _ in self?.confirmResetWindows() })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))

@@ -13,8 +13,10 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - base HDD は変更せず、変更 sector のみ `win95-base-CDRIVE.sav` に保存
 - Metal による XRGB8888 framebuffer 表示
 - AVAudioEngine による 48 kHz stereo PCM 出力
-- タッチトラックパッド、左右クリック、iOS ソフトウェアキーボード、物理キーボード
-- ISO の ATAPI CD-ROM mount/eject
+- 全画面 Metal 表示（2本指タップで操作バーを表示/非表示）
+- タッチトラックパッド、左右クリック、iOS ソフトウェアキーボード、USB HID 物理キーボード
+- UTM 型の特殊キーバー（修飾キー、Esc、Tab、矢印、F1〜F12、編集・ロックキー）
+- 複数 ISO/CUE/CHD の保存、一覧選択、ATAPI CD-ROM 交換/eject
 - pause/resume、hardware reset、save/load state、Windows データ初期化
 - background 移行時の state 保存と HDD overlay flush
 - iPhone / iPad 共通 UI
@@ -92,7 +94,9 @@ iOS 側の主な保存先:
 Application Support/Win95/
 ├── win95-base.img / .vhd       # Files picker から取り込んだ場合のみ
 ├── suspend.state
-├── mounted-cd.iso
+├── CDs/
+│   ├── install-disc-1.iso
+│   └── install-disc-2.iso
 ├── Saves/
 │   └── win95-base-CDRIVE.sav   # 変更 sector のみ
 └── System/

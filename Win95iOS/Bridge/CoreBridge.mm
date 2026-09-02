@@ -83,6 +83,8 @@ static void CoreLog(enum retro_log_level level, const char *format, ...) {
 
     std::mutex _operationMutex;
     std::deque<Operation> _operations;
+    std::unordered_map<std::string, unsigned> _cdImageIndices;
+    int _activeCDIndex;
 
     std::string _saveDirectory;
     std::string _systemDirectory;
@@ -134,6 +136,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         _leftButton = _rightButton = false;
         _videoWidth = _videoHeight = _videoPitch = 0;
         _videoGeneration = 0;
+        _activeCDIndex = -1;
         _saveDirectory = saveDirectory.fileSystemRepresentation;
         _systemDirectory = systemDirectory.fileSystemRepresentation;
         _options = {
@@ -186,6 +189,8 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         gBridge = self;
         gKeyboardCallback = nullptr;
         gHasDiskControl = false;
+        _cdImageIndices.clear();
+        _activeCDIndex = -1;
         _contentPath = path.fileSystemRepresentation;
         _contentPath += "#I*SVGA (Super Video Graphics Array)";
 
@@ -202,6 +207,8 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             retro_deinit();
             gKeyboardCallback = nullptr;
             gHasDiskControl = false;
+            _cdImageIndices.clear();
+            _activeCDIndex = -1;
             gBridge = nil;
             _running = false;
             [self finishOperation:completion error:CoreError(2, @"DOSBox Pure could not load the disk image.")];
@@ -233,6 +240,8 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         retro_deinit();
         gKeyboardCallback = nullptr;
         gHasDiskControl = false;
+        _cdImageIndices.clear();
+        _activeCDIndex = -1;
         gBridge = nil;
         _running = false;
         _paused = false;
@@ -313,15 +322,50 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
                 break;
             }
             case PendingOperation::MountCD: {
-                if (!gHasDiskControl || !gDiskControl.add_image_index || !gDiskControl.replace_image_index) { error = CoreError(6, @"CD-ROM control is unavailable."); break; }
-                unsigned index = gDiskControl.get_num_images();
-                retro_game_info info = {};
-                info.path = operation.path.c_str();
-                if (!gDiskControl.add_image_index() || !gDiskControl.set_image_index(index) || !gDiskControl.replace_image_index(index, &info) || !gDiskControl.set_eject_state(false)) error = CoreError(7, @"The CD image could not be mounted.");
+                if (!gHasDiskControl || !gDiskControl.set_eject_state || !gDiskControl.set_image_index ||
+                    !gDiskControl.get_num_images || !gDiskControl.add_image_index || !gDiskControl.replace_image_index) {
+                    error = CoreError(6, @"CD-ROM control is unavailable.");
+                    break;
+                }
+
+                unsigned index = 0;
+                auto existing = _cdImageIndices.find(operation.path);
+                if (existing != _cdImageIndices.end()) {
+                    index = existing->second;
+                }
+
+                if (_activeCDIndex >= 0 && (existing == _cdImageIndices.end() || _activeCDIndex != (int)index)) {
+                    if (!gDiskControl.set_image_index((unsigned)_activeCDIndex) || !gDiskControl.set_eject_state(true)) {
+                        error = CoreError(7, @"The current CD image could not be ejected.");
+                        break;
+                    }
+                    _activeCDIndex = -1;
+                }
+
+                if (existing == _cdImageIndices.end()) {
+                    index = gDiskControl.get_num_images();
+                    retro_game_info info = {};
+                    info.path = operation.path.c_str();
+                    if (!gDiskControl.add_image_index() || !gDiskControl.set_image_index(index) ||
+                        !gDiskControl.replace_image_index(index, &info)) {
+                        error = CoreError(7, @"The CD image could not be registered.");
+                        break;
+                    }
+                    _cdImageIndices.emplace(operation.path, index);
+                }
+                if (!gDiskControl.set_image_index(index) || !gDiskControl.set_eject_state(false)) {
+                    error = CoreError(7, @"The CD image could not be mounted.");
+                    break;
+                }
+                _activeCDIndex = (int)index;
                 break;
             }
             case PendingOperation::EjectCD:
-                if (gHasDiskControl && gDiskControl.set_eject_state) gDiskControl.set_eject_state(true);
+                if (_activeCDIndex >= 0 && gHasDiskControl && gDiskControl.set_image_index && gDiskControl.set_eject_state) {
+                    gDiskControl.set_image_index((unsigned)_activeCDIndex);
+                    gDiskControl.set_eject_state(true);
+                    _activeCDIndex = -1;
+                }
                 break;
             case PendingOperation::None:
                 break;

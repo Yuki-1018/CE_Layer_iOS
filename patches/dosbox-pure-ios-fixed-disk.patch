@@ -59,6 +59,14 @@ index 347c4c7..1e99340 100644
  			// If there is no mounted hard disk image but a D: drive, setup the CDROM IDE controller
  			if (!imageDiskList['C'-'A'] && Drives['D'-'A'])
  				IDE_SetupControllers(true);
+@@ -640,3 +647,6 @@ struct DBP_Run
+ 		if (cpath && (dbp_content_path.c_str() + dbp_content_path.length() - cpath) <= DOS_PATHLENGTH)
+-			autostrlen = (Bit16u)sprintf(buf, "%s%s", (cpath[1] && cpath[2] == ':' ? "" : "C:\\"), cpath + 1);
++		{
++			const bool is_directive = (cpath[1] && cpath[2] == '*');
++			autostrlen = (Bit16u)sprintf(buf, "%s%s", (is_directive || (cpath[1] && cpath[2] == ':') ? "" : "C:\\"), cpath + 1);
++		}
+ 
 diff --git a/dosbox_pure_libretro.cpp b/dosbox_pure_libretro.cpp
 index 1909302..b913e38 100644
 --- a/dosbox_pure_libretro.cpp
