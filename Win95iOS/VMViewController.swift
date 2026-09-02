@@ -125,8 +125,6 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         displayView.addGestureRecognizer(tap)
 
         let drag = UILongPressGestureRecognizer(target: self, action: #selector(dragMouse(_:)))
-        drag.minimumPressDuration = 0.2
-        drag.allowableMovement = .greatestFiniteMagnitude
         drag.numberOfTouchesRequired = 1
         drag.allowedTouchTypes = directTouchTypes
         drag.delegate = self
@@ -303,18 +301,52 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         do {
             let input = try FileHandle(forReadingFrom: source)
             let output = try FileHandle(forWritingTo: partial)
+            var copiedBytes: Int64 = 0
             defer { try? input.close(); try? output.close() }
-            while true {
+            while try autoreleasepool(invoking: {
                 let data = try input.read(upToCount: 4 * 1024 * 1024) ?? Data()
-                if data.isEmpty { break }
+                guard !data.isEmpty else { return false }
                 try output.write(contentsOf: data)
-            }
+                copiedBytes += Int64(data.count)
+                return true
+            }) {}
             try output.synchronize()
+            guard sourceSize == 0 || copiedBytes == sourceSize else {
+                throw NSError(
+                    domain: "Win95UI",
+                    code: 5,
+                    userInfo: [NSLocalizedDescriptionKey: "CDイメージを最後まで読み込めませんでした。"]
+                )
+            }
+            if destination.pathExtension.lowercased() == "iso" { try validateISO(at: partial) }
             try fileManager.moveItem(at: partial, to: destination)
+            var resourceValues = URLResourceValues()
+            resourceValues.isExcludedFromBackup = true
+            var storedURL = destination
+            try? storedURL.setResourceValues(resourceValues)
         } catch {
             try? fileManager.removeItem(at: partial)
             throw error
         }
+    }
+
+    private func validateISO(at url: URL) throws {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let signatures: [[UInt8]] = [
+            [1, 67, 68, 48, 48, 49, 1], // ISO 9660: \u{1}CD001\u{1}
+            [1, 67, 68, 82, 79, 77, 1]  // High Sierra: \u{1}CDROM\u{1}
+        ]
+        for offset in [32_768, 32_776, 37_400, 37_408, 37_648, 37_656, 37_664] {
+            try handle.seek(toOffset: UInt64(offset))
+            let bytes = Array((try handle.read(upToCount: 7) ?? Data()).prefix(7))
+            if signatures.contains(bytes) { return }
+        }
+        throw NSError(
+            domain: "Win95UI",
+            code: 6,
+            userInfo: [NSLocalizedDescriptionKey: "有効なISO 9660 CDイメージではありません。ファイルが破損していないか確認してください。"]
+        )
     }
 
     @objc private func showCDMenu() {
@@ -366,6 +398,10 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     private func mountCD(_ url: URL) {
+        if url.pathExtension.lowercased() == "iso" {
+            do { try validateISO(at: url) }
+            catch { showError(error); return }
+        }
         bridge.mountCD(at: url) { [weak self] error in
             if let error { self?.showError(error) }
             else { self?.activeCDURL = url }
