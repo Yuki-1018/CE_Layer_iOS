@@ -18,6 +18,8 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var pendingImport: ImportKind = .disk
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var activeCDURL: URL?
+    private weak var pauseButton: UIButton?
+    private weak var cdLibraryController: CDLibraryViewController?
 
     private enum ImportKind { case disk, cd }
 
@@ -91,10 +93,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         view.addSubview(toolbar)
 
         toolbar.addButton("⌨︎", target: self, action: #selector(showKeyboard), hint: "Keyboard")
-        toolbar.addButton("L", target: self, action: #selector(leftClick), hint: "Left click")
-        toolbar.addButton("R", target: self, action: #selector(rightClick), hint: "Right click")
         toolbar.addButton("CD", target: self, action: #selector(showCDMenu), hint: "CD images")
-        toolbar.addButton("Ⅱ", target: self, action: #selector(togglePause), hint: "Pause or resume")
+        pauseButton = toolbar.addButton("", target: self, action: #selector(togglePause), hint: "Pause")
+        updatePauseButton()
         toolbar.addButton("↻", target: self, action: #selector(resetVM), hint: "Reset")
         toolbar.addButton("•••", target: self, action: #selector(showActions), hint: "More")
 
@@ -206,11 +207,15 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     @objc private func importCD() {
+        presentCDPicker(from: self)
+    }
+
+    private func presentCDPicker(from presenter: UIViewController) {
         pendingImport = .cd
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.isoImage, .data], asCopy: false)
         picker.delegate = self
         picker.allowsMultipleSelection = true
-        present(picker, animated: true)
+        presenter.present(picker, animated: true)
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
@@ -241,6 +246,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private func importCDImages(_ sources: [URL]) {
         guard !sources.isEmpty else { return }
         toolbar.showActivity(true)
+        refreshCDLibrary(busy: true)
         let destinationDirectory = cdDirectory
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
@@ -253,11 +259,13 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 }
                 DispatchQueue.main.async {
                     self.toolbar.showActivity(false)
-                    if let firstMountable { self.mountCD(firstMountable) }
+                    self.refreshCDLibrary(busy: false)
+                    if self.activeCDURL == nil, let firstMountable { self.mountCD(firstMountable) }
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.toolbar.showActivity(false)
+                    self.refreshCDLibrary(busy: false)
                     self.showError(error)
                 }
             }
@@ -350,23 +358,29 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     @objc private func showCDMenu() {
-        let sheet = UIAlertController(title: "CD-ROM", message: "複数のイメージを保存し、実行中に交換できます。", preferredStyle: .actionSheet)
-        sheet.addAction(UIAlertAction(title: "CDイメージを追加…", style: .default) { [weak self] _ in self?.importCD() })
-        for url in storedCDImages {
-            let prefix = activeCDURL == url ? "✓ " : ""
-            sheet.addAction(UIAlertAction(title: prefix + url.lastPathComponent, style: .default) { [weak self] _ in
-                self?.mountCD(url)
-            })
+        if let existing = cdLibraryController {
+            existing.reload(images: storedCDImages, activeURL: activeCDURL, busy: false)
+            return
         }
-        if activeCDURL != nil {
-            sheet.addAction(UIAlertAction(title: "CDを取り出す", style: .destructive) { [weak self] _ in self?.ejectCD() })
+
+        let library = CDLibraryViewController(images: storedCDImages, activeURL: activeCDURL)
+        library.onAdd = { [weak self, weak library] in
+            guard let self, let library else { return }
+            self.presentCDPicker(from: library)
         }
-        sheet.addAction(UIAlertAction(title: "キャンセル", style: .cancel))
-        if let popover = sheet.popoverPresentationController {
-            popover.sourceView = toolbar
-            popover.sourceRect = toolbar.bounds
-        }
-        present(sheet, animated: true)
+        library.onMount = { [weak self] url in self?.mountCD(url) }
+        library.onEject = { [weak self] in self?.ejectCD() }
+        library.onDelete = { [weak self] url in self?.confirmDeleteCD(url) }
+        library.onDismiss = { [weak self] in self?.dismiss(animated: true) }
+        cdLibraryController = library
+
+        let navigation = UINavigationController(rootViewController: library)
+        navigation.modalPresentationStyle = .formSheet
+        present(navigation, animated: true)
+    }
+
+    private func refreshCDLibrary(busy: Bool) {
+        cdLibraryController?.reload(images: storedCDImages, activeURL: activeCDURL, busy: busy)
     }
 
     private var storedCDImages: [URL] {
@@ -402,15 +416,58 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             do { try validateISO(at: url) }
             catch { showError(error); return }
         }
+        refreshCDLibrary(busy: true)
         bridge.mountCD(at: url) { [weak self] error in
-            if let error { self?.showError(error) }
-            else { self?.activeCDURL = url }
+            guard let self else { return }
+            if let error { self.showError(error) }
+            else { self.activeCDURL = url }
+            self.refreshCDLibrary(busy: false)
         }
     }
 
     private func ejectCD() {
-        bridge.ejectCD()
-        activeCDURL = nil
+        refreshCDLibrary(busy: true)
+        bridge.ejectCD { [weak self] error in
+            guard let self else { return }
+            if let error { self.showError(error) }
+            else { self.activeCDURL = nil }
+            self.refreshCDLibrary(busy: false)
+        }
+    }
+
+    private func confirmDeleteCD(_ url: URL) {
+        let alert = UIAlertController(
+            title: "CDイメージを削除しますか？",
+            message: url.lastPathComponent,
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "キャンセル", style: .cancel))
+        alert.addAction(UIAlertAction(title: "削除", style: .destructive) { [weak self] _ in
+            self?.deleteCD(url)
+        })
+        let presenter: UIViewController = cdLibraryController ?? self
+        presenter.present(alert, animated: true)
+    }
+
+    private func deleteCD(_ url: URL) {
+        refreshCDLibrary(busy: true)
+        let removeFile = { [weak self] in
+            guard let self else { return }
+            do { try FileManager.default.removeItem(at: url) }
+            catch { self.showError(error) }
+            self.refreshCDLibrary(busy: false)
+        }
+        guard activeCDURL == url else { removeFile(); return }
+        bridge.ejectCD { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.showError(error)
+                self.refreshCDLibrary(busy: false)
+                return
+            }
+            self.activeCDURL = nil
+            removeFile()
+        }
     }
 
     @objc private func showKeyboard() { keyboardCapture.becomeFirstResponder() }
@@ -498,7 +555,16 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         }
     }
 
-    @objc private func togglePause() { bridge.setEmulationPaused(!bridge.isPaused) }
+    @objc private func togglePause() {
+        bridge.setEmulationPaused(!bridge.isPaused)
+        updatePauseButton()
+    }
+
+    private func updatePauseButton() {
+        let paused = bridge?.isPaused ?? false
+        pauseButton?.setImage(UIImage(systemName: paused ? "play.fill" : "pause.fill"), for: .normal)
+        pauseButton?.accessibilityLabel = paused ? "Resume" : "Pause"
+    }
     @objc private func resetVM() { bridge.reset() }
 
     @objc private func showActions() {
@@ -569,6 +635,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     @objc private func appDidBecomeActive() { becomeFirstResponder() }
 
     private func handleCoreStatus(_ status: String) {
+        if status == "Running" || status == "Paused" { updatePauseButton() }
         if status == "Stopped" || status == "Shutdown" { audio.stop() }
         guard status == "Shutdown" else { return }
         displayLink?.invalidate()
@@ -630,8 +697,158 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private func showError(_ error: Error) {
         let alert = UIAlertController(title: "Error", message: error.localizedDescription, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
-        present(alert, animated: true)
+        var presenter: UIViewController = self
+        while let presented = presenter.presentedViewController, !presented.isBeingDismissed {
+            presenter = presented
+        }
+        presenter.present(alert, animated: true)
     }
+}
+
+private final class CDLibraryViewController: UITableViewController {
+    var onAdd: (() -> Void)?
+    var onMount: ((URL) -> Void)?
+    var onEject: (() -> Void)?
+    var onDelete: ((URL) -> Void)?
+    var onDismiss: (() -> Void)?
+
+    private var images: [URL]
+    private var activeURL: URL?
+    private var busy = false
+    private let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+
+    init(images: [URL], activeURL: URL?) {
+        self.images = images
+        self.activeURL = activeURL
+        super.init(style: .insetGrouped)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "CD-ROM"
+        navigationItem.leftBarButtonItem = UIBarButtonItem(
+            barButtonSystemItem: .add,
+            target: self,
+            action: #selector(addImage)
+        )
+        navigationItem.leftBarButtonItem?.accessibilityLabel = "CDイメージを追加"
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            barButtonSystemItem: .done,
+            target: self,
+            action: #selector(dismissLibrary)
+        )
+        tableView.allowsSelection = true
+    }
+
+    func reload(images: [URL], activeURL: URL?, busy: Bool) {
+        self.images = images
+        self.activeURL = activeURL
+        self.busy = busy
+        navigationItem.leftBarButtonItem?.isEnabled = !busy
+        tableView.isUserInteractionEnabled = !busy
+        tableView.alpha = busy ? 0.6 : 1
+        if busy {
+            let spinner = UIActivityIndicatorView(style: .medium)
+            spinner.startAnimating()
+            navigationItem.titleView = spinner
+        } else {
+            navigationItem.titleView = nil
+            title = "CD-ROM"
+        }
+        tableView.reloadData()
+    }
+
+    override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        if section == 0 { return activeURL == nil ? 1 : 2 }
+        return images.count + 1
+    }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        section == 0 ? "現在のCD-ROM" : "保存済みイメージ"
+    }
+
+    override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
+        guard section == 1 else { return nil }
+        return "イメージをタップするとD:ドライブへマウントします。左へスワイプすると削除できます。"
+    }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
+        cell.textLabel?.numberOfLines = 1
+
+        if indexPath.section == 0 {
+            if indexPath.row == 0 {
+                if let activeURL {
+                    cell.textLabel?.text = activeURL.lastPathComponent
+                    cell.detailTextLabel?.text = "D: にマウント中"
+                    cell.imageView?.image = UIImage(systemName: "opticaldisc.fill")
+                } else {
+                    cell.textLabel?.text = "ディスクなし"
+                    cell.detailTextLabel?.text = "保存済みイメージを選択してください"
+                    cell.imageView?.image = UIImage(systemName: "opticaldisc")
+                }
+                cell.selectionStyle = .none
+            } else {
+                cell.textLabel?.text = "CDを取り出す"
+                cell.textLabel?.textColor = .systemRed
+                cell.imageView?.image = UIImage(systemName: "eject.fill")
+            }
+            return cell
+        }
+
+        if indexPath.row == 0 {
+            cell.textLabel?.text = "CDイメージを追加…"
+            cell.textLabel?.textColor = view.tintColor
+            cell.imageView?.image = UIImage(systemName: "plus.circle.fill")
+            return cell
+        }
+
+        let imageURL = images[indexPath.row - 1]
+        cell.textLabel?.text = imageURL.lastPathComponent
+        if let size = try? imageURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+            cell.detailTextLabel?.text = byteFormatter.string(fromByteCount: Int64(size))
+        }
+        cell.imageView?.image = UIImage(systemName: "opticaldisc")
+        cell.accessoryType = imageURL == activeURL ? .checkmark : .none
+        return cell
+    }
+
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        guard !busy else { return }
+        if indexPath.section == 0 {
+            if indexPath.row == 1 { onEject?() }
+        } else if indexPath.row == 0 {
+            onAdd?()
+        } else {
+            let url = images[indexPath.row - 1]
+            if url != activeURL { onMount?(url) }
+        }
+    }
+
+    override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
+        !busy && indexPath.section == 1 && indexPath.row > 0
+    }
+
+    override func tableView(
+        _ tableView: UITableView,
+        commit editingStyle: UITableViewCell.EditingStyle,
+        forRowAt indexPath: IndexPath
+    ) {
+        guard editingStyle == .delete, indexPath.section == 1, indexPath.row > 0 else { return }
+        onDelete?(images[indexPath.row - 1])
+    }
+
+    @objc private func addImage() { if !busy { onAdd?() } }
+    @objc private func dismissLibrary() { onDismiss?() }
 }
 
 private extension UTType {
@@ -692,15 +909,18 @@ private final class FloatingMenuView: UIView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func addButton(_ title: String, target: Any?, action: Selector, hint: String) {
+    @discardableResult
+    func addButton(_ title: String, target: Any?, action: Selector, hint: String) -> UIButton {
         let button = UIButton(type: .system)
         button.setTitle(title, for: .normal)
         button.setTitleColor(.white, for: .normal)
+        button.tintColor = .white
         button.titleLabel?.font = .systemFont(ofSize: title.count > 2 ? 13 : 17, weight: .semibold)
         button.accessibilityLabel = hint
         button.addTarget(target, action: action, for: .touchUpInside)
         button.widthAnchor.constraint(equalToConstant: 43).isActive = true
         buttonStack.addArrangedSubview(button)
+        return button
     }
 
     func showActivity(_ visible: Bool) {

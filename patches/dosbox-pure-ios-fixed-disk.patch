@@ -39,27 +39,48 @@ index a2962b5..1d19fd1 100644
  {
  	if (sector_size > 512) return false; // unsupported here
 diff --git a/dosbox_pure_run.h b/dosbox_pure_run.h
-index 347c4c7..1e99340 100644
+index a942090..8483d89 100644
 --- a/dosbox_pure_run.h
 +++ b/dosbox_pure_run.h
-@@ -158,8 +158,15 @@ struct DBP_Run
+@@ -157,12 +157,30 @@ struct DBP_Run
+ 		{
  			DBP_Mount(0, false); // make sure something is mounted
  
- 			// If hard disk image was mounted to D:, swap it to be the bootable C: drive
+-			// If hard disk image was mounted to D:, swap it to be the bootable C: drive
 -			std::swap(imageDiskList['D'-'A'], imageDiskList['C'-'A']);
-+			if (imageDiskList['D'-'A'])
-+				std::swap(imageDiskList['D'-'A'], imageDiskList['C'-'A']);
-+			else if (imageDiskList['E'-'A'])
-+				std::swap(imageDiskList['E'-'A'], imageDiskList['C'-'A']);
++			// If hard disk image was mounted to D:/E:, move it to the bootable C: drive.
++			// The FAT drive owns the same imageDisk pointer, so detach it before freeing
++			// the temporary DOS drive. Otherwise mounting an ISO at D: frees the C: disk.
++			char fixed_disk_drive = 0;
++			if (imageDiskList['D'-'A']) fixed_disk_drive = 'D';
++			else if (imageDiskList['E'-'A']) fixed_disk_drive = 'E';
++			if (fixed_disk_drive)
++			{
++				DBP_Image* fixed_disk_image = NULL;
++				for (DBP_Image& image : dbp_images)
++					if (image.mounted && image.drive == fixed_disk_drive) { fixed_disk_image = &image; break; }
++				std::swap(imageDiskList[fixed_disk_drive-'A'], imageDiskList['C'-'A']);
++				if (fatDrive* mounted = dynamic_cast<fatDrive*>(Drives[fixed_disk_drive-'A']))
++					if (mounted->loadedDisk == imageDiskList['C'-'A']) mounted->loadedDisk = NULL;
++				DBP_Unmount(fixed_disk_drive);
++				if (fixed_disk_image) { fixed_disk_image->mounted = true; fixed_disk_image->drive = 'C'; }
++			}
 +
 +			// The iOS fixed machine keeps its bundled/imported base image immutable.
 +			if (imageDiskList['C'-'A'])
 +				imageDiskList['C'-'A']->SetDifferencingDisk(DBP_GetSaveFile(SFT_DIFFDISK).c_str());
  
- 			// If there is no mounted hard disk image but a D: drive, setup the CDROM IDE controller
- 			if (!imageDiskList['C'-'A'] && Drives['D'-'A'])
- 				IDE_SetupControllers(true);
-@@ -640,3 +647,6 @@ struct DBP_Run
+-			// If there is no mounted hard disk image but a D: drive, setup the CDROM IDE controller
+-			if (!imageDiskList['C'-'A'] && Drives['D'-'A'])
+-				IDE_SetupControllers(true);
++			// Keep an empty ATAPI slot available so a CD can be inserted after boot.
++			IDE_SetupControllers(true);
+ 
+ 			// Install the NE2000 network card
+ 			NET_SetupEthernet();
+@@ -638,7 +656,10 @@ struct DBP_Run
+ 
+ 		const char* cpath = (autostrlen ? NULL : strrchr(dbp_content_path.c_str(), '#'));
  		if (cpath && (dbp_content_path.c_str() + dbp_content_path.length() - cpath) <= DOS_PATHLENGTH)
 -			autostrlen = (Bit16u)sprintf(buf, "%s%s", (cpath[1] && cpath[2] == ':' ? "" : "C:\\"), cpath + 1);
 +		{
@@ -67,11 +88,45 @@ index 347c4c7..1e99340 100644
 +			autostrlen = (Bit16u)sprintf(buf, "%s%s", (is_directive || (cpath[1] && cpath[2] == ':') ? "" : "C:\\"), cpath + 1);
 +		}
  
+ 		for (char *p = buf, *pEnd = p + autostrlen, *line, line_no = 1; p != pEnd; line_no++)
+ 		{
 diff --git a/dosbox_pure_libretro.cpp b/dosbox_pure_libretro.cpp
-index 1909302..b913e38 100644
+index ec99bf3..f6931de 100644
 --- a/dosbox_pure_libretro.cpp
 +++ b/dosbox_pure_libretro.cpp
-@@ -3377,6 +3377,16 @@ void retro_reset(void)
+@@ -39,6 +39,7 @@
+ #include "keyb2joypad.h"
+ #include "libretro-common/include/libretro.h"
+ #include "libretro-common/include/retro_timers.h"
++#include <atomic>
+ #include <string>
+ #include <sstream>
+ 
+@@ -60,6 +61,7 @@ static retro_system_av_info av_info;
+ static enum DBP_State : Bit8u { DBPSTATE_BOOT, DBPSTATE_EXITED, DBPSTATE_SHUTDOWN, DBPSTATE_REBOOT, DBPSTATE_FIRST_FRAME, DBPSTATE_RUNNING } dbp_state;
+ static enum DBP_SerializeMode : Bit8u { DBPSERIALIZE_STATES, DBPSERIALIZE_REWIND, DBPSERIALIZE_DISABLED } dbp_serializemode;
+ static bool dbp_game_running, dbp_pause_events, dbp_paused_midframe, dbp_frame_pending, dbp_biosreboot, dbp_biospoweroff, dbp_system_cached, dbp_system_scannable, dbp_refresh_memmaps;
++static std::atomic_bool dbp_win95_poweroff_requested{false};
+ static bool dbp_optionsupdatecallback, dbp_reboot_set64mem, dbp_use_network, dbp_had_game_running, dbp_strict_mode, dbp_legacy_save, dbp_wasloaded, dbp_skip_c_mount;
+ static signed char dbp_menu_time, dbp_conf_loading, dbp_reboot_machine;
+ static Bit8u dbp_alphablend_base;
+@@ -1302,6 +1304,7 @@ void DBP_OnBIOSReboot()
+ void DBP_OnBIOSPoweroff()
+ {
+ 	// to be called on the DOSBox thread
++	dbp_win95_poweroff_requested.store(true);
+ 	dbp_biosreboot = true;
+ 	dbp_biospoweroff = true;
+ 	if (first_shell) DBP_DOSBOX_ForceShutdown();
+@@ -3067,6 +3070,7 @@ void retro_init(void) //#3
+ 
+ bool retro_load_game(const struct retro_game_info *info) //#4
+ {
++	dbp_win95_poweroff_requested.store(false);
+ 	#ifndef DBP_STANDALONE
+ 	enum retro_pixel_format pixel_format = RETRO_PIXEL_FORMAT_XRGB8888;
+ 	if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &pixel_format))
+@@ -3377,6 +3381,21 @@ void retro_reset(void)
  		input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)));
  }
  
@@ -83,6 +138,11 @@ index 1909302..b913e38 100644
 +		if (imageDiskList[i])
 +			imageDiskList[i]->FlushDifferencingDisk();
 +	DBP_ThreadControl(TCM_RESUME_FRAME);
++}
++
++extern "C" bool dbp_win95_guest_shutdown(void)
++{
++	return dbp_win95_poweroff_requested.load();
 +}
 +
  void retro_run_touchpad(bool has_press, Bit16s absx, Bit16s absy)

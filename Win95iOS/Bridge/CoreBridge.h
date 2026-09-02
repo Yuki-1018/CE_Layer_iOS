@@ -33,7 +33,7 @@ typedef void (^Win95Completion)(NSError * _Nullable error);
 - (void)saveStateToURL:(NSURL *)url completion:(Win95Completion)completion;
 - (void)loadStateFromURL:(NSURL *)url completion:(Win95Completion)completion;
 - (void)mountCDAtURL:(NSURL *)url completion:(Win95Completion)completion;
-- (void)ejectCD;
+- (void)ejectCDWithCompletion:(Win95Completion)completion NS_SWIFT_NAME(ejectCD(completion:));
 
 - (nullable Win95VideoFrame *)latestVideoFrameAfterGeneration:(uint64_t)generation;
 - (NSUInteger)readAudioFrames:(int16_t *)buffer maxFrames:(NSUInteger)maxFrames;

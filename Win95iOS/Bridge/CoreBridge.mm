@@ -13,6 +13,7 @@
 #include <vector>
 
 extern "C" void dbp_win95_flush_disk(void);
+extern "C" bool dbp_win95_guest_shutdown(void);
 
 static NSString * const Win95CoreErrorDomain = @"Win95Core";
 
@@ -244,7 +245,13 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             @autoreleasepool {
                 [self processOperations];
                 if (_resetRequested.exchange(false)) retro_reset();
-                if (!_paused.load()) retro_run();
+                if (!_paused.load()) {
+                    retro_run();
+                    if (dbp_win95_guest_shutdown()) {
+                        _guestShutdownRequested = true;
+                        _stopRequested = true;
+                    }
+                }
                 else std::this_thread::sleep_for(std::chrono::milliseconds(8));
             }
             deadline += std::chrono::microseconds(16667);
@@ -308,8 +315,9 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
     [self enqueueOperation:Operation{PendingOperation::MountCD, url.fileSystemRepresentation, [completion copy]}];
 }
 
-- (void)ejectCD {
-    if (_running.load()) [self enqueueOperation:Operation{PendingOperation::EjectCD, {}, nil}];
+- (void)ejectCDWithCompletion:(Win95Completion)completion {
+    if (!_running.load()) { [self finishOperation:completion error:CoreError(8, @"The virtual machine is not running.")]; return; }
+    [self enqueueOperation:Operation{PendingOperation::EjectCD, {}, [completion copy]}];
 }
 
 - (void)processOperations {
@@ -343,7 +351,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
                 break;
             }
             case PendingOperation::MountCD: {
-                if (!gHasDiskControl || !gDiskControl.set_eject_state || !gDiskControl.set_image_index ||
+                if (!gHasDiskControl || !gDiskControl.set_eject_state || !gDiskControl.get_eject_state || !gDiskControl.set_image_index ||
                     !gDiskControl.get_num_images || !gDiskControl.add_image_index || !gDiskControl.replace_image_index) {
                     error = CoreError(6, @"CD-ROM control is unavailable.");
                     break;
@@ -356,7 +364,8 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
                 }
 
                 if (_activeCDIndex >= 0 && (existing == _cdImageIndices.end() || _activeCDIndex != (int)index)) {
-                    if (!gDiskControl.set_image_index((unsigned)_activeCDIndex) || !gDiskControl.set_eject_state(true)) {
+                    if (!gDiskControl.set_image_index((unsigned)_activeCDIndex) ||
+                        !gDiskControl.set_eject_state(true) || !gDiskControl.get_eject_state()) {
                         error = CoreError(7, @"The current CD image could not be ejected.");
                         break;
                     }
@@ -374,7 +383,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
                     }
                     _cdImageIndices.emplace(operation.path, index);
                 }
-                if (!gDiskControl.set_image_index(index) || !gDiskControl.set_eject_state(false)) {
+                if (!gDiskControl.set_image_index(index) || !gDiskControl.set_eject_state(false) || gDiskControl.get_eject_state()) {
                     error = CoreError(7, @"The CD image could not be mounted.");
                     break;
                 }
@@ -382,10 +391,15 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
                 break;
             }
             case PendingOperation::EjectCD:
-                if (_activeCDIndex >= 0 && gHasDiskControl && gDiskControl.set_image_index && gDiskControl.set_eject_state) {
-                    gDiskControl.set_image_index((unsigned)_activeCDIndex);
-                    gDiskControl.set_eject_state(true);
-                    _activeCDIndex = -1;
+                if (_activeCDIndex >= 0) {
+                    if (!gHasDiskControl || !gDiskControl.set_image_index || !gDiskControl.set_eject_state || !gDiskControl.get_eject_state) {
+                        error = CoreError(6, @"CD-ROM control is unavailable.");
+                    } else if (!gDiskControl.set_image_index((unsigned)_activeCDIndex) ||
+                               !gDiskControl.set_eject_state(true) || !gDiskControl.get_eject_state()) {
+                        error = CoreError(7, @"The current CD image could not be ejected.");
+                    } else {
+                        _activeCDIndex = -1;
+                    }
                 }
                 break;
             case PendingOperation::None:
@@ -552,7 +566,8 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             return true;
         }
         case RETRO_ENVIRONMENT_SHUTDOWN:
-            if (!_stopRequested.exchange(true)) _guestShutdownRequested = true;
+            _guestShutdownRequested = true;
+            _stopRequested = true;
             return true;
         default:
             return false;

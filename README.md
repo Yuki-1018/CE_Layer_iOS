@@ -15,11 +15,11 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - AVAudioEngine による 48 kHz stereo PCM 出力
 - アスペクト比を維持する全画面 Metal 表示（iPhone、iPad、AirPlay ミラーリング対応）
 - 画面内を移動できる折りたたみ式コンパクト操作メニュー
-- タッチトラックパッド、長押しドラッグ、2本指右クリック／スクロール、左右クリック
+- タッチトラックパッド、長押しドラッグ、2本指右クリック／スクロール
 - iOS ソフトウェアキーボード、USB/Bluetooth HID 物理キーボード、外部マウス／トラックパッド
 - UTM 型の特殊キーバー（修飾キー、Esc、Tab、矢印、F1〜F12、編集・ロックキー）
-- 複数 ISO/CUE/CHD の保存、一覧選択、ATAPI CD-ROM 交換/eject（大容量イメージのストリーミング取込）
-- pause/resume、hardware reset、save/load state、Windows データ初期化
+- 複数 ISO/CUE/CHD の保存、専用一覧からの追加・mount・eject・削除（大容量イメージのストリーミング取込）
+- 別アイコンで判別できる pause/resume、hardware reset、save/load state、Windows データ初期化
 - Windows の正常な shutdown を検出したら DOSBox Pure のメニューを出さずアプリを終了
 - background 移行時の state 保存と HDD overlay flush
 - iPhone / iPad 共通 UI
@@ -111,6 +111,8 @@ Application Support/Win95/
 
 - 右上の `•••` をタップ: コンパクトメニューを展開／折りたたみ
 - `•••` をドラッグ: メニューを画面内の任意位置へ移動
+- `CD`: CD-ROM 管理画面を開く。保存済みイメージのタップで mount、`CDを取り出す` で eject、左スワイプで削除
+- `⏸` / `▶`: Windows の一時停止／再開（現在実行できる操作のアイコンを表示）
 - 1本指ドラッグ: マウスカーソル移動
 - タップ: 左クリック
 - 指を動かさず長押ししてからドラッグ: 左ボタンを押したまま移動（ペイント、範囲選択、ウィンドウ移動）。通常の1本指移動中にドラッグへ切り替わることはありません。
