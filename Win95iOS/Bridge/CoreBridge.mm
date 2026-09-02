@@ -21,6 +21,7 @@ static NSString * const Win95CoreErrorDomain = @"Win95Core";
 @property(nonatomic, readwrite) NSInteger width;
 @property(nonatomic, readwrite) NSInteger height;
 @property(nonatomic, readwrite) NSInteger bytesPerRow;
+@property(nonatomic, readwrite) double aspectRatio;
 @property(nonatomic, readwrite) uint64_t generation;
 @end
 
@@ -65,17 +66,21 @@ static void CoreLog(enum retro_log_level level, const char *format, ...) {
     std::atomic_bool _running;
     std::atomic_bool _paused;
     std::atomic_bool _stopRequested;
+    std::atomic_bool _guestShutdownRequested;
     std::atomic_bool _resetRequested;
     std::atomic_int _mouseX;
     std::atomic_int _mouseY;
     std::atomic_bool _leftButton;
     std::atomic_bool _rightButton;
+    std::atomic_int _wheelUp;
+    std::atomic_int _wheelDown;
 
     std::mutex _videoMutex;
     std::vector<uint8_t> _video;
     NSInteger _videoWidth;
     NSInteger _videoHeight;
     NSInteger _videoPitch;
+    double _videoAspectRatio;
     uint64_t _videoGeneration;
 
     std::mutex _audioMutex;
@@ -131,10 +136,13 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         _running = false;
         _paused = false;
         _stopRequested = false;
+        _guestShutdownRequested = false;
         _resetRequested = false;
         _mouseX = _mouseY = 0;
         _leftButton = _rightButton = false;
+        _wheelUp = _wheelDown = 0;
         _videoWidth = _videoHeight = _videoPitch = 0;
+        _videoAspectRatio = 4.0 / 3.0;
         _videoGeneration = 0;
         _activeCDIndex = -1;
         _saveDirectory = saveDirectory.fileSystemRepresentation;
@@ -144,7 +152,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             {"dosbox_pure_savestate", "on"},
             {"dosbox_pure_strict_mode", "false"},
             {"dosbox_pure_conf", "false"},
-            {"dosbox_pure_menu_time", "99"},
+            {"dosbox_pure_menu_time", "0"},
             {"dosbox_pure_mouse_input", "true"},
             {"dosbox_pure_mouse_speed_factor", "1.0"},
             {"dosbox_pure_cycles", "77000"},
@@ -179,7 +187,11 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         return;
     }
     _stopRequested = false;
+    _guestShutdownRequested = false;
     _paused = false;
+    _mouseX = _mouseY = 0;
+    _leftButton = _rightButton = false;
+    _wheelUp = _wheelDown = 0;
     NSString *path = diskURL.path;
     dispatch_async(_emulationQueue, ^{ [self runDiskPath:path completion:completion]; });
 }
@@ -217,6 +229,12 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
 
         retro_system_av_info av = {};
         retro_get_system_av_info(&av);
+        {
+            std::lock_guard<std::mutex> lock(_videoMutex);
+            _videoAspectRatio = av.geometry.aspect_ratio > 0.0f
+                ? av.geometry.aspect_ratio
+                : (av.geometry.base_height ? (double)av.geometry.base_width / av.geometry.base_height : 4.0 / 3.0);
+        }
         [self finishOperation:completion error:nil];
         if (self.statusHandler) dispatch_async(dispatch_get_main_queue(), ^{ self.statusHandler(@"Running"); });
 
@@ -245,7 +263,10 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         gBridge = nil;
         _running = false;
         _paused = false;
-        if (self.statusHandler) dispatch_async(dispatch_get_main_queue(), ^{ self.statusHandler(@"Stopped"); });
+        const bool guestShutdown = _guestShutdownRequested.load();
+        if (self.statusHandler) dispatch_async(dispatch_get_main_queue(), ^{
+            self.statusHandler(guestShutdown ? @"Shutdown" : @"Stopped");
+        });
     }
 }
 
@@ -387,6 +408,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
     frame.width = _videoWidth;
     frame.height = _videoHeight;
     frame.bytesPerRow = _videoPitch;
+    frame.aspectRatio = _videoAspectRatio;
     frame.generation = _videoGeneration;
     return frame;
 }
@@ -428,6 +450,12 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
     _mouseY.fetch_add((int)MAX(-32767, MIN(32767, deltaY)));
 }
 
+- (void)addMouseWheelDelta:(NSInteger)delta {
+    const int steps = (int)MAX(-32, MIN(32, delta));
+    if (steps < 0) _wheelUp.fetch_add(-steps);
+    else if (steps > 0) _wheelDown.fetch_add(steps);
+}
+
 - (void)setLeftMouseButton:(BOOL)pressed { _leftButton = pressed; }
 - (void)setRightMouseButton:(BOOL)pressed { _rightButton = pressed; }
 
@@ -438,6 +466,16 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         case RETRO_DEVICE_ID_MOUSE_Y: return (int16_t)MAX(-32767, MIN(32767, _mouseY.exchange(0)));
         case RETRO_DEVICE_ID_MOUSE_LEFT: return _leftButton.load() ? 1 : 0;
         case RETRO_DEVICE_ID_MOUSE_RIGHT: return _rightButton.load() ? 1 : 0;
+        case RETRO_DEVICE_ID_MOUSE_WHEELUP: {
+            int value = _wheelUp.load();
+            while (value > 0 && !_wheelUp.compare_exchange_weak(value, value - 1)) {}
+            return value > 0 ? 1 : 0;
+        }
+        case RETRO_DEVICE_ID_MOUSE_WHEELDOWN: {
+            int value = _wheelDown.load();
+            while (value > 0 && !_wheelDown.compare_exchange_weak(value, value - 1)) {}
+            return value > 0 ? 1 : 0;
+        }
         default: return 0;
     }
 }
@@ -485,11 +523,26 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK:
-        case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO:
-        case RETRO_ENVIRONMENT_SET_GEOMETRY:
         case RETRO_ENVIRONMENT_SET_MEMORY_MAPS:
         case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
             return true;
+        case RETRO_ENVIRONMENT_SET_GEOMETRY: {
+            const retro_game_geometry *geometry = static_cast<const retro_game_geometry *>(data);
+            std::lock_guard<std::mutex> lock(_videoMutex);
+            _videoAspectRatio = geometry->aspect_ratio > 0.0f
+                ? geometry->aspect_ratio
+                : (geometry->base_height ? (double)geometry->base_width / geometry->base_height : _videoAspectRatio);
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO: {
+            const retro_system_av_info *info = static_cast<const retro_system_av_info *>(data);
+            const retro_game_geometry &geometry = info->geometry;
+            std::lock_guard<std::mutex> lock(_videoMutex);
+            _videoAspectRatio = geometry.aspect_ratio > 0.0f
+                ? geometry.aspect_ratio
+                : (geometry.base_height ? (double)geometry.base_width / geometry.base_height : _videoAspectRatio);
+            return true;
+        }
         case RETRO_ENVIRONMENT_SET_MESSAGE: {
             retro_message *message = static_cast<retro_message *>(data);
             if (self.statusHandler && message->msg) {
@@ -499,7 +552,8 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             return true;
         }
         case RETRO_ENVIRONMENT_SHUTDOWN:
-            _stopRequested = true; return true;
+            if (!_stopRequested.exchange(true)) _guestShutdownRequested = true;
+            return true;
         default:
             return false;
     }

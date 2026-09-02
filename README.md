@@ -13,11 +13,14 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - base HDD は変更せず、変更 sector のみ `win95-base-CDRIVE.sav` に保存
 - Metal による XRGB8888 framebuffer 表示
 - AVAudioEngine による 48 kHz stereo PCM 出力
-- 全画面 Metal 表示（2本指タップで操作バーを表示/非表示）
-- タッチトラックパッド、左右クリック、iOS ソフトウェアキーボード、USB HID 物理キーボード
+- アスペクト比を維持する全画面 Metal 表示（iPhone、iPad、AirPlay ミラーリング対応）
+- 画面内を移動できる折りたたみ式コンパクト操作メニュー
+- タッチトラックパッド、長押しドラッグ、2本指右クリック／スクロール、左右クリック
+- iOS ソフトウェアキーボード、USB/Bluetooth HID 物理キーボード、外部マウス／トラックパッド
 - UTM 型の特殊キーバー（修飾キー、Esc、Tab、矢印、F1〜F12、編集・ロックキー）
-- 複数 ISO/CUE/CHD の保存、一覧選択、ATAPI CD-ROM 交換/eject
+- 複数 ISO/CUE/CHD の保存、一覧選択、ATAPI CD-ROM 交換/eject（大容量イメージのストリーミング取込）
 - pause/resume、hardware reset、save/load state、Windows データ初期化
+- Windows の正常な shutdown を検出したら DOSBox Pure のメニューを出さずアプリを終了
 - background 移行時の state 保存と HDD overlay flush
 - iPhone / iPad 共通 UI
 
@@ -104,12 +107,23 @@ Application Support/Win95/
 
 通常の reset / power cycle では overlay を消しません。「Reset Windows Data」だけが overlay と save state を削除します。
 
+## 操作
+
+- 右上の `•••` をタップ: コンパクトメニューを展開／折りたたみ
+- `•••` をドラッグ: メニューを画面内の任意位置へ移動
+- 1本指ドラッグ: マウスカーソル移動
+- タップ: 左クリック
+- 長押ししながらドラッグ: 左ボタンを押したまま移動（ペイント、範囲選択、ウィンドウ移動）
+- 2本指タップ: 右クリック
+- 2本指ドラッグ: ホイールスクロール
+- 外部マウス／トラックパッド: 移動、左右ボタン、ドラッグ、スクロールを直接送信
+
 ## 現在の制約
 
 - DOSBox Pure が提供する NE2000 は guest から検出できますが、この専用 frontend はインターネット向け user-mode NAT をまだ接続していません。
 - Win95 の CPU 負荷は高く、古い端末では実時間速度に届かない場合があります。iOS の実行コード制限に抵触しないよう JIT は意図的に使用していません。
 - save state は core revision、CPU、RAM、video 設定に依存します。アプリ更新後に互換性がない場合は通常 boot を使用してください。
-- guest 内から正常に Windows を shutdown してからアプリを閉じるのが最も安全です。
+- Windows の shutdown 完了時は HDD overlay を flush してからアプリが自動終了します。
 
 ## ライセンス
 

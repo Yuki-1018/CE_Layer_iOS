@@ -8,6 +8,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) NSInteger width;
 @property(nonatomic, readonly) NSInteger height;
 @property(nonatomic, readonly) NSInteger bytesPerRow;
+@property(nonatomic, readonly) double aspectRatio;
 @property(nonatomic, readonly) uint64_t generation;
 @end
 
@@ -39,6 +40,7 @@ typedef void (^Win95Completion)(NSError * _Nullable error);
 
 - (void)sendKey:(unsigned)keyCode pressed:(BOOL)pressed;
 - (void)addMouseDeltaX:(NSInteger)deltaX deltaY:(NSInteger)deltaY;
+- (void)addMouseWheelDelta:(NSInteger)delta;
 - (void)setLeftMouseButton:(BOOL)pressed;
 - (void)setRightMouseButton:(BOOL)pressed;
 

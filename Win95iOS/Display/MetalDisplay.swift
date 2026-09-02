@@ -4,6 +4,7 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
     private var pipeline: MTLRenderPipelineState!
     private var commandQueue: MTLCommandQueue!
     private var texture: MTLTexture?
+    private var contentAspectRatio: CGFloat = 4.0 / 3.0
     private let textureLock = NSLock()
 
     init() {
@@ -50,6 +51,7 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
                 bytesPerRow: frame.bytesPerRow
             )
         }
+        contentAspectRatio = frame.aspectRatio > 0 ? CGFloat(frame.aspectRatio) : CGFloat(frame.width) / CGFloat(frame.height)
         textureLock.unlock()
     }
 
@@ -62,9 +64,37 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
               let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { return }
         textureLock.lock()
         let activeTexture = texture
+        let activeAspectRatio = contentAspectRatio
         textureLock.unlock()
         encoder.setRenderPipelineState(pipeline)
         if let activeTexture {
+            let drawableWidth = Double(view.drawableSize.width)
+            let drawableHeight = Double(view.drawableSize.height)
+            let drawableAspectRatio = drawableHeight > 0 ? drawableWidth / drawableHeight : 1
+            let contentAspectRatio = max(0.01, Double(activeAspectRatio))
+            let viewport: MTLViewport
+            if drawableAspectRatio > contentAspectRatio {
+                let width = drawableHeight * contentAspectRatio
+                viewport = MTLViewport(
+                    originX: (drawableWidth - width) / 2,
+                    originY: 0,
+                    width: width,
+                    height: drawableHeight,
+                    znear: 0,
+                    zfar: 1
+                )
+            } else {
+                let height = drawableWidth / contentAspectRatio
+                viewport = MTLViewport(
+                    originX: 0,
+                    originY: (drawableHeight - height) / 2,
+                    width: drawableWidth,
+                    height: height,
+                    znear: 0,
+                    zfar: 1
+                )
+            }
+            encoder.setViewport(viewport)
             encoder.setFragmentTexture(activeTexture, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }

@@ -47,13 +47,18 @@ enum RetroKey {
     static let leftControl: UInt32 = 306
     static let rightAlt: UInt32 = 307
     static let leftAlt: UInt32 = 308
+    static let leftSuper: UInt32 = 311
+    static let rightSuper: UInt32 = 312
     static let printScreen: UInt32 = 316
+    static let menu: UInt32 = 319
+    static let power: UInt32 = 320
 
     static func fromHIDUsage(_ usage: Int) -> UInt32? {
         if (4...29).contains(usage) { return UInt32(usage - 4 + 97) }
         if (30...38).contains(usage) { return UInt32(usage - 30 + 49) }
         if (58...69).contains(usage) { return UInt32(usage - 58) + f1 }
         if (89...97).contains(usage) { return UInt32(usage - 89) + keypad1 }
+        if (104...106).contains(usage) { return UInt32(usage - 104) + f12 + 1 }
 
         switch usage {
         case 39: return 48
@@ -96,12 +101,16 @@ enum RetroKey {
         case 98: return keypad0
         case 99: return keypadPeriod
         case 103: return keypadEquals
+        case 101: return menu
+        case 102: return power
         case 224: return leftControl
         case 225: return leftShift
         case 226: return leftAlt
+        case 227: return leftSuper
         case 228: return rightControl
         case 229: return rightShift
         case 230: return rightAlt
+        case 231: return rightSuper
         default: return nil
         }
     }
@@ -111,11 +120,15 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
     var sendKey: ((UInt32, Bool) -> Void)? {
         didSet { accessory.sendKey = sendKey }
     }
+    var keyboardDidHide: (() -> Void)?
 
     private lazy var accessory: SpecialKeyAccessoryView = {
         let view = SpecialKeyAccessoryView()
         view.sendKey = sendKey
-        view.hideKeyboard = { [weak self] in self?.resignFirstResponder() }
+        view.hideKeyboard = { [weak self] in
+            self?.resignFirstResponder()
+            self?.keyboardDidHide?()
+        }
         view.pasteText = { [weak self] in
             guard let text = UIPasteboard.general.string else { return }
             self?.insertText(text)
@@ -143,6 +156,28 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if !forwardPhysicalKeys(presses, pressed: true) { super.pressesBegan(presses, with: event) }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if !forwardPhysicalKeys(presses, pressed: false) { super.pressesEnded(presses, with: event) }
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if !forwardPhysicalKeys(presses, pressed: false) { super.pressesCancelled(presses, with: event) }
+    }
+
+    private func forwardPhysicalKeys(_ presses: Set<UIPress>, pressed: Bool) -> Bool {
+        var handled = false
+        for press in presses {
+            guard let key = press.key, let mapped = RetroKey.fromHIDUsage(key.keyCode.rawValue) else { continue }
+            sendKey?(mapped, pressed)
+            handled = true
+        }
+        return handled
+    }
 
     func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
         if string.isEmpty {
@@ -230,7 +265,7 @@ private final class SpecialKeyAccessoryView: UIView {
         let modifiers = UIStackView()
         modifiers.axis = .horizontal
         modifiers.spacing = 4
-        for spec in [("Ctrl", RetroKey.leftControl), ("Alt", RetroKey.leftAlt), ("⇧", RetroKey.leftShift)] {
+        for spec in [("Ctrl", RetroKey.leftControl), ("Alt", RetroKey.leftAlt), ("Win", RetroKey.leftSuper), ("⇧", RetroKey.leftShift)] {
             modifiers.addArrangedSubview(makeButton(title: spec.0, key: spec.1, modifier: true))
         }
         root.addArrangedSubview(modifiers)
@@ -250,7 +285,7 @@ private final class SpecialKeyAccessoryView: UIView {
             ("Ins", RetroKey.insert), ("Del", RetroKey.delete), ("Home", RetroKey.home),
             ("End", RetroKey.end), ("Pg Up", RetroKey.pageUp), ("Pg Dn", RetroKey.pageDown),
             ("PrtSc", RetroKey.printScreen), ("Pause", RetroKey.pause),
-            ("Caps", RetroKey.capsLock), ("Num", RetroKey.numLock), ("Scroll", RetroKey.scrollLock)
+            ("Menu", RetroKey.menu), ("Caps", RetroKey.capsLock), ("Num", RetroKey.numLock), ("Scroll", RetroKey.scrollLock)
         ]
         navigation.forEach { keys.addArrangedSubview(makeButton(title: $0.0, key: $0.1)) }
         for offset in 0...11 {
