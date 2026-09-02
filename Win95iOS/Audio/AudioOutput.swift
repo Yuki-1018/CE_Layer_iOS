@@ -27,7 +27,7 @@ final class AudioOutput {
         let source = AVAudioSourceNode(format: format) { _, _, frameCount, audioBufferList in
             let list = UnsafeMutableAudioBufferListPointer(audioBufferList)
             guard let raw = list.first?.mData else { return noErr }
-            _ = bridge.readAudioFrames(raw.assumingMemoryBound(to: Int16.self), maxFrames: Int(frameCount))
+            _ = bridge.readAudioFrames(raw.assumingMemoryBound(to: Int16.self), maxFrames: UInt(frameCount))
             return noErr
         }
         engine.attach(source)
@@ -43,4 +43,3 @@ final class AudioOutput {
         try? AVAudioSession.sharedInstance().setActive(false)
     }
 }
-
