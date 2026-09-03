@@ -6,16 +6,20 @@
 #include <cstdarg>
 #include <cstdio>
 #include <deque>
+#include <fcntl.h>
 #include <mutex>
 #include <string>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unordered_map>
+#include <unistd.h>
 #include <vector>
 
 extern "C" void dbp_win95_flush_disk(void);
 extern "C" bool dbp_win95_guest_shutdown(void);
-extern "C" bool dbp_win95_mount_cd(const char *path);
-extern "C" bool dbp_win95_eject_cd(void);
+extern "C" void dbp_win95_set_initial_cd(const char *path);
+extern "C" void dbp_win95_release_input(void);
 
 static NSString * const Win95CoreErrorDomain = @"Win95Core";
 
@@ -33,7 +37,12 @@ static NSString * const Win95CoreErrorDomain = @"Win95Core";
 
 namespace {
 
-enum class PendingOperation { None, MountCD, EjectCD, Flush };
+enum class PendingOperation { None, Flush, SaveSuspend, LoadSuspend, ReleaseInput };
+
+struct KeyEvent {
+    unsigned keyCode;
+    bool pressed;
+};
 
 struct Operation {
     PendingOperation kind = PendingOperation::None;
@@ -48,6 +57,54 @@ static NSError *CoreError(NSInteger code, NSString *description) {
     return [NSError errorWithDomain:Win95CoreErrorDomain
                                code:code
                            userInfo:@{NSLocalizedDescriptionKey: description}];
+}
+
+static NSError *SaveSuspendState(const std::string &path) {
+    const size_t size = retro_serialize_size();
+    if (!size) return CoreError(9, @"DOSBox Pure did not provide a suspend-state size.");
+
+    const std::string partial = path + ".partial";
+    int fd = open(partial.c_str(), O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (fd < 0) return CoreError(10, @"The suspend-state file could not be created.");
+    if (ftruncate(fd, static_cast<off_t>(size)) != 0) {
+        close(fd); unlink(partial.c_str());
+        return CoreError(10, @"Space could not be reserved for the suspend state.");
+    }
+    void *mapping = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapping == MAP_FAILED) {
+        close(fd); unlink(partial.c_str());
+        return CoreError(10, @"The suspend state could not be mapped into memory.");
+    }
+
+    const bool serialized = retro_serialize(mapping, size);
+    const bool synchronized = serialized && msync(mapping, size, MS_SYNC) == 0 && fsync(fd) == 0;
+    munmap(mapping, size);
+    close(fd);
+    if (!synchronized || rename(partial.c_str(), path.c_str()) != 0) {
+        unlink(partial.c_str());
+        return CoreError(11, @"The suspend state could not be saved.");
+    }
+    return nil;
+}
+
+static NSError *LoadSuspendState(const std::string &path) {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) return CoreError(12, @"The saved suspend state was not found.");
+    struct stat info = {};
+    if (fstat(fd, &info) != 0 || info.st_size <= 0) {
+        close(fd);
+        return CoreError(12, @"The saved suspend state is invalid.");
+    }
+    const size_t size = static_cast<size_t>(info.st_size);
+    void *mapping = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mapping == MAP_FAILED) {
+        close(fd);
+        return CoreError(12, @"The saved suspend state could not be read.");
+    }
+    const bool loaded = retro_unserialize(mapping, size);
+    munmap(mapping, size);
+    close(fd);
+    return loaded ? nil : CoreError(13, @"DOSBox Pure rejected the saved suspend state.");
 }
 
 static void CoreLog(enum retro_log_level level, const char *format, ...) {
@@ -90,13 +147,17 @@ static void CoreLog(enum retro_log_level level, const char *format, ...) {
     std::mutex _operationMutex;
     std::deque<Operation> _operations;
 
+    std::mutex _inputMutex;
+    std::deque<KeyEvent> _keyEvents;
+
     std::string _saveDirectory;
     std::string _systemDirectory;
     std::string _contentPath;
     std::unordered_map<std::string, std::string> _options;
 }
-- (void)runDiskPath:(NSString *)path completion:(Win95Completion)completion;
+- (void)runDiskPath:(NSString *)path CDPath:(NSString * _Nullable)CDPath completion:(Win95Completion)completion;
 - (void)processOperations;
+- (void)processKeyEvents;
 - (void)finishOperation:(Win95Completion)completion error:(NSError * _Nullable)error;
 - (bool)environmentCommand:(unsigned)command data:(void *)data;
 - (void)receiveVideo:(const void *)data width:(unsigned)width height:(unsigned)height pitch:(size_t)pitch;
@@ -147,7 +208,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         _systemDirectory = systemDirectory.fileSystemRepresentation;
         _options = {
             {"dosbox_pure_force60fps", "true"},
-            {"dosbox_pure_savestate", "disabled"},
+            {"dosbox_pure_savestate", "on"},
             {"dosbox_pure_strict_mode", "false"},
             {"dosbox_pure_conf", "false"},
             {"dosbox_pure_menu_time", "0"},
@@ -179,7 +240,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
 - (BOOL)isRunning { return _running.load(); }
 - (BOOL)isPaused { return _paused.load(); }
 
-- (void)startWithDiskURL:(NSURL *)diskURL completion:(Win95Completion)completion {
+- (void)startWithDiskURL:(NSURL *)diskURL CDURL:(NSURL *)CDURL completion:(Win95Completion)completion {
     if (_running.exchange(true)) {
         [self finishOperation:completion error:CoreError(1, @"The virtual machine is already running.")];
         return;
@@ -187,19 +248,25 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
     _stopRequested = false;
     _guestShutdownRequested = false;
     _paused = false;
-    _mouseX = _mouseY = 0;
-    _leftButton = _rightButton = false;
-    _wheelUp = _wheelDown = 0;
+    {
+        std::lock_guard<std::mutex> lock(_inputMutex);
+        _keyEvents.clear();
+        _mouseX = _mouseY = 0;
+        _leftButton = _rightButton = false;
+        _wheelUp = _wheelDown = 0;
+    }
     NSString *path = diskURL.path;
-    dispatch_async(_emulationQueue, ^{ [self runDiskPath:path completion:completion]; });
+    NSString *CDPath = CDURL.path;
+    dispatch_async(_emulationQueue, ^{ [self runDiskPath:path CDPath:CDPath completion:completion]; });
 }
 
-- (void)runDiskPath:(NSString *)path completion:(Win95Completion)completion {
+- (void)runDiskPath:(NSString *)path CDPath:(NSString *)CDPath completion:(Win95Completion)completion {
     @autoreleasepool {
         gBridge = self;
         gKeyboardCallback = nullptr;
         _contentPath = path.fileSystemRepresentation;
         _contentPath += "#I*SVGA (Super Video Graphics Array)";
+        dbp_win95_set_initial_cd(CDPath ? CDPath.fileSystemRepresentation : nullptr);
 
         retro_set_environment(EnvironmentCallback);
         retro_set_video_refresh(VideoCallback);
@@ -237,6 +304,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
                 [self processOperations];
                 if (_resetRequested.exchange(false)) retro_reset();
                 if (!_paused.load()) {
+                    [self processKeyEvents];
                     retro_run();
                     if (dbp_win95_guest_shutdown()) {
                         _guestShutdownRequested = true;
@@ -251,6 +319,9 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             else deadline = now;
         }
 
+        // Finish requests that raced with a stop (notably the last automatic
+        // suspend write) while the libretro instance is still valid.
+        [self processOperations];
         dbp_win95_flush_disk();
         retro_unload_game();
         retro_deinit();
@@ -272,8 +343,20 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
 }
 
 - (void)setEmulationPaused:(BOOL)paused {
-    _paused = paused;
-    if (paused) [self flushDisk];
+    const bool changed = _paused.exchange(paused) != paused;
+    if (paused) {
+        {
+            std::lock_guard<std::mutex> lock(_inputMutex);
+            _keyEvents.clear();
+            _mouseX = _mouseY = 0;
+            _leftButton = _rightButton = false;
+            _wheelUp = _wheelDown = 0;
+        }
+        if (changed && _running.load()) {
+            [self enqueueOperation:Operation{PendingOperation::ReleaseInput, {}, nil}];
+            [self flushDisk];
+        }
+    }
     if (self.statusHandler) dispatch_async(dispatch_get_main_queue(), ^{ self.statusHandler(paused ? @"Paused" : @"Running"); });
 }
 
@@ -296,14 +379,17 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
     [self enqueueOperation:Operation{PendingOperation::Flush, {}, [completion copy]}];
 }
 
-- (void)mountCDAtURL:(NSURL *)url completion:(Win95Completion)completion {
+- (void)saveSuspendStateToURL:(NSURL *)url completion:(Win95Completion)completion {
     if (!_running.load()) { [self finishOperation:completion error:CoreError(8, @"The virtual machine is not running.")]; return; }
-    [self enqueueOperation:Operation{PendingOperation::MountCD, url.fileSystemRepresentation, [completion copy]}];
+    [self enqueueOperation:Operation{PendingOperation::SaveSuspend, url.fileSystemRepresentation, [completion copy]}];
 }
 
-- (void)ejectCDWithCompletion:(Win95Completion)completion {
+- (void)loadSuspendStateFromURL:(NSURL *)url completion:(Win95Completion)completion {
     if (!_running.load()) { [self finishOperation:completion error:CoreError(8, @"The virtual machine is not running.")]; return; }
-    [self enqueueOperation:Operation{PendingOperation::EjectCD, {}, [completion copy]}];
+    // Freeze before loading so the restored guest cannot advance while the
+    // completion travels back to UIKit.
+    [self setEmulationPaused:YES];
+    [self enqueueOperation:Operation{PendingOperation::LoadSuspend, url.fileSystemRepresentation, [completion copy]}];
 }
 
 - (void)processOperations {
@@ -318,14 +404,15 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             case PendingOperation::Flush:
                 dbp_win95_flush_disk();
                 break;
-            case PendingOperation::MountCD: {
-                if (!dbp_win95_mount_cd(operation.path.c_str())) {
-                    error = CoreError(7, @"The CD image could not be mounted.");
-                }
+            case PendingOperation::SaveSuspend:
+                dbp_win95_flush_disk();
+                error = SaveSuspendState(operation.path);
                 break;
-            }
-            case PendingOperation::EjectCD:
-                if (!dbp_win95_eject_cd()) error = CoreError(7, @"The current CD image could not be ejected.");
+            case PendingOperation::LoadSuspend:
+                error = LoadSuspendState(operation.path);
+                break;
+            case PendingOperation::ReleaseInput:
+                dbp_win95_release_input();
                 break;
             case PendingOperation::None:
                 break;
@@ -380,26 +467,49 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
 }
 
 - (void)sendKey:(unsigned)keyCode pressed:(BOOL)pressed {
+    std::lock_guard<std::mutex> lock(_inputMutex);
+    if (!_running.load() || _paused.load()) return;
+    _keyEvents.push_back(KeyEvent{keyCode, static_cast<bool>(pressed)});
+}
+
+- (void)processKeyEvents {
+    std::deque<KeyEvent> events;
+    {
+        std::lock_guard<std::mutex> lock(_inputMutex);
+        events.swap(_keyEvents);
+    }
     retro_keyboard_event_t callback = gKeyboardCallback.load();
-    if (_running.load() && callback) callback(pressed, keyCode, 0, 0);
+    if (!callback) return;
+    for (const KeyEvent &event : events) callback(event.pressed, event.keyCode, 0, 0);
 }
 
 - (void)addMouseDeltaX:(NSInteger)deltaX deltaY:(NSInteger)deltaY {
+    std::lock_guard<std::mutex> lock(_inputMutex);
+    if (!_running.load() || _paused.load()) return;
     _mouseX.fetch_add((int)MAX(-32767, MIN(32767, deltaX)));
     _mouseY.fetch_add((int)MAX(-32767, MIN(32767, deltaY)));
 }
 
 - (void)addMouseWheelDelta:(NSInteger)delta {
+    std::lock_guard<std::mutex> lock(_inputMutex);
+    if (!_running.load() || _paused.load()) return;
     const int steps = (int)MAX(-32, MIN(32, delta));
     if (steps < 0) _wheelUp.fetch_add(-steps);
     else if (steps > 0) _wheelDown.fetch_add(steps);
 }
 
-- (void)setLeftMouseButton:(BOOL)pressed { _leftButton = pressed; }
-- (void)setRightMouseButton:(BOOL)pressed { _rightButton = pressed; }
+- (void)setLeftMouseButton:(BOOL)pressed {
+    std::lock_guard<std::mutex> lock(_inputMutex);
+    _leftButton = (!_paused.load() && pressed);
+}
+
+- (void)setRightMouseButton:(BOOL)pressed {
+    std::lock_guard<std::mutex> lock(_inputMutex);
+    _rightButton = (!_paused.load() && pressed);
+}
 
 - (int16_t)inputStatePort:(unsigned)port device:(unsigned)device index:(unsigned)index identifier:(unsigned)identifier {
-    if (port || device != RETRO_DEVICE_MOUSE) return 0;
+    if (_paused.load() || port || device != RETRO_DEVICE_MOUSE) return 0;
     switch (identifier) {
         case RETRO_DEVICE_ID_MOUSE_X: return (int16_t)MAX(-32767, MIN(32767, _mouseX.exchange(0)));
         case RETRO_DEVICE_ID_MOUSE_Y: return (int16_t)MAX(-32767, MIN(32767, _mouseY.exchange(0)));

@@ -18,8 +18,8 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - タッチトラックパッド、長押しドラッグ、2本指右クリック／スクロール
 - iOS ソフトウェアキーボード、USB/Bluetooth HID 物理キーボード、外部マウス／トラックパッド
 - UTM 型の特殊キーバー（Win/Ctrl/Alt/Shiftと文字・特殊キーの同時押し、Esc、Tab、矢印、F1〜F12、編集・ロックキー）
-- 複数 ISO/CUE/CHD の保存、専用一覧からの追加・mount・eject・削除（大容量イメージのストリーミング取込）
-- 別アイコンで判別できる pause/resume と hardware reset
+- 複数 ISO/CUE/CHD の保存、専用一覧からの追加・mount・eject・削除（大容量イメージのストリーミング取込、安全な起動時mount）
+- 別アイコンで判別できる pause/resume、一時停止状態の自動保存・次回復帰、hardware reset
 - Windows の正常な shutdown を検出したら DOSBox Pure のメニューを出さずアプリを終了
 - background 移行時と正常終了時の HDD overlay flush
 - iPhone / iPad 共通 UI
@@ -100,7 +100,8 @@ Application Support/Win95/
 │   ├── install-disc-1.iso
 │   └── install-disc-2.iso
 ├── Saves/
-│   └── win95-base-CDRIVE.sav   # 変更 sector のみ
+│   ├── win95-base-CDRIVE.sav   # 変更 sector のみ
+│   └── automatic-suspend.state # 一時停止中だけ保持する自動復帰状態
 └── System/
 ```
 
@@ -112,8 +113,8 @@ Application Support/Win95/
 - `≡` をドラッグ: メニューを画面内の任意位置へ移動
 - キーボードアイコン: ソフトウェアキーボードを表示／非表示
 - 特殊キーバーの Win/Ctrl/Alt/Shift: 選択後に文字または特殊キーを押すと同時押しとして送信
-- `CD`: CD-ROM 管理画面を開く。保存済みイメージのタップで mount、`CDを取り出す` で eject、左スワイプで削除
-- `⏸` / `▶`: Windows の一時停止／再開（現在実行できる操作のアイコンを表示）
+- `CD`: CD-ROM 管理画面を開く。保存済みイメージのタップで mount、`CDを取り出す` で eject、左スワイプで削除。DOS/MSCDEX/IDE の稼働中書換えによるクラッシュを避けるため、変更時は Windows を安全に再起動します。
+- `⏸` / `▶`: Windows の一時停止／再開（現在実行できる操作のアイコンを表示）。一時停止中にアプリを閉じた場合は、次回起動時に保存地点を復元して一時停止画面へ戻ります。
 - 1本指ドラッグ: マウスカーソル移動
 - タップ: 左クリック
 - 指を動かさず長押ししてからドラッグ: 左ボタンを押したまま移動（ペイント、範囲選択、ウィンドウ移動）。通常の1本指移動中にドラッグへ切り替わることはありません。

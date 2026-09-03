@@ -239,6 +239,10 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
         resignFirstResponder()
         keyboardDidHide?()
     }
+
+    func releaseModifiers() {
+        accessory.releaseModifiers()
+    }
 }
 
 private final class SpecialKeyButton: UIButton {

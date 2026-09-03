@@ -6,6 +6,7 @@ import UIKit
 
 final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGestureRecognizerDelegate, UIPointerInteractionDelegate {
     private let displayView = MetalDisplayView()
+    private let pauseOverlay = PauseOverlayView()
     private let toolbar = FloatingMenuView()
     private let keyboardCapture = KeyboardCaptureView()
     private var bridge: Win95CoreBridge!
@@ -18,6 +19,11 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var pendingImport: ImportKind = .disk
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var activeCDURL: URL?
+    private var activeDiskURL: URL?
+    private var manuallyPaused = false
+    private var resumeAfterForeground = false
+    private var pauseGeneration = 0
+    private var isRestartingForCD = false
     private weak var pauseButton: UIButton?
     private weak var cdLibraryController: CDLibraryViewController?
 
@@ -30,6 +36,8 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var savesDirectory: URL { supportDirectory.appendingPathComponent("Saves", isDirectory: true) }
     private var systemDirectory: URL { supportDirectory.appendingPathComponent("System", isDirectory: true) }
     private var cdDirectory: URL { supportDirectory.appendingPathComponent("CDs", isDirectory: true) }
+    private var suspendStateURL: URL { savesDirectory.appendingPathComponent("automatic-suspend.state") }
+    private let selectedCDKey = "SelectedCDImageName"
     private var importedDiskURL: URL? {
         for ext in ["img", "vhd"] {
             let url = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(ext)
@@ -81,6 +89,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         try? FileManager.default.createDirectory(at: savesDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: cdDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: suspendStateURL.appendingPathExtension("partial"))
     }
 
     private func configureUI() {
@@ -88,10 +97,14 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         displayView.isMultipleTouchEnabled = true
         view.addSubview(displayView)
 
+        pauseOverlay.translatesAutoresizingMaskIntoConstraints = false
+        pauseOverlay.isHidden = true
+        view.addSubview(pauseOverlay)
+
         view.addSubview(toolbar)
 
         let keyboardButton = toolbar.addButton("", target: self, action: #selector(showKeyboard), hint: "Keyboard")
-        let keyboardSymbol = UIImage.SymbolConfiguration(pointSize: 23, weight: .semibold)
+        let keyboardSymbol = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
         keyboardButton.setImage(UIImage(systemName: "keyboard", withConfiguration: keyboardSymbol), for: .normal)
         toolbar.addButton("CD", target: self, action: #selector(showCDMenu), hint: "CD images")
         pauseButton = toolbar.addButton("", target: self, action: #selector(togglePause), hint: "Pause")
@@ -105,6 +118,10 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             displayView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             displayView.topAnchor.constraint(equalTo: view.topAnchor),
             displayView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            pauseOverlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            pauseOverlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            pauseOverlay.topAnchor.constraint(equalTo: view.topAnchor),
+            pauseOverlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             keyboardCapture.widthAnchor.constraint(equalToConstant: 1),
             keyboardCapture.heightAnchor.constraint(equalToConstant: 1),
             keyboardCapture.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -171,17 +188,54 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     private func startBundledOrImportedDisk() {
-        if let importedDiskURL { startVM(disk: importedDiskURL); return }
-        if let bundled = Bundle.main.url(forResource: "win95-base", withExtension: "img", subdirectory: "BundledContent") { startVM(disk: bundled); return }
+        let initialCD = persistedCDURL
+        if let importedDiskURL { startVM(disk: importedDiskURL, CD: initialCD); return }
+        if let bundled = Bundle.main.url(forResource: "win95-base", withExtension: "img", subdirectory: "BundledContent") { startVM(disk: bundled, CD: initialCD); return }
         showMissingDisk()
     }
 
-    private func startVM(disk: URL) {
-        activeCDURL = nil
-        bridge.start(withDiskURL: disk) { [weak self] error in
+    private var persistedCDURL: URL? {
+        guard let name = UserDefaults.standard.string(forKey: selectedCDKey),
+              !name.contains("/"), !name.contains("\\") else { return nil }
+        let url = cdDirectory.appendingPathComponent(name)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    private func startVM(disk: URL, CD: URL?, restoreSuspendState: Bool = true) {
+        activeDiskURL = disk
+        activeCDURL = CD
+        bridge.start(diskURL: disk, cdURL: CD) { [weak self] error in
             guard let self else { return }
+            self.isRestartingForCD = false
+            self.toolbar.showActivity(false)
+            self.refreshCDLibrary(busy: false)
             if let error { self.showError(error); return }
-            do { try self.audio.start() } catch { self.showError(error) }
+            if restoreSuspendState, FileManager.default.fileExists(atPath: self.suspendStateURL.path) {
+                self.restoreAutomaticSuspendState()
+            } else {
+                self.startAudioIfNeeded()
+            }
+        }
+    }
+
+    private func startAudioIfNeeded() {
+        guard !bridge.isPaused else { return }
+        do { try audio.start() } catch { showError(error) }
+    }
+
+    private func restoreAutomaticSuspendState() {
+        bridge.loadSuspendState(from: suspendStateURL) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                try? FileManager.default.removeItem(at: self.suspendStateURL)
+                self.showError(error)
+                self.bridge.setEmulationPaused(false)
+                self.startAudioIfNeeded()
+                return
+            }
+            self.manuallyPaused = true
+            self.bridge.setEmulationPaused(true)
+            self.updatePausedAppearance(saving: false)
         }
     }
 
@@ -228,7 +282,13 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 let destination = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(ext)
                 try FileManager.default.copyItem(at: source, to: destination)
                 try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: destination.path)
-                startVM(disk: destination)
+                discardAutomaticSuspendState()
+                if bridge.isRunning {
+                    audio.stop()
+                    bridge.stop { [weak self] in self?.startVM(disk: destination, CD: nil, restoreSuspendState: false) }
+                } else {
+                    startVM(disk: destination, CD: nil, restoreSuspendState: false)
+                }
             } catch { showError(error) }
         case .cd:
             importCDImages(urls)
@@ -408,23 +468,38 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             do { try validateISO(at: url) }
             catch { showError(error); return }
         }
-        refreshCDLibrary(busy: true)
-        bridge.mountCD(at: url) { [weak self] error in
-            guard let self else { return }
-            if let error { self.showError(error) }
-            else { self.activeCDURL = url }
-            self.refreshCDLibrary(busy: false)
-        }
+        restartVM(with: url)
     }
 
     private func ejectCD() {
+        restartVM(with: nil)
+    }
+
+    private func restartVM(with CD: URL?, afterStop: (() -> Void)? = nil) {
+        guard !isRestartingForCD, let disk = activeDiskURL else { return }
+        isRestartingForCD = true
         refreshCDLibrary(busy: true)
-        bridge.ejectCD { [weak self] error in
+        toolbar.showActivity(true)
+        keyboardCapture.dismissKeyboard()
+        audio.stop()
+        manuallyPaused = false
+        resumeAfterForeground = false
+        discardAutomaticSuspendState()
+        updatePausedAppearance(saving: false)
+
+        let relaunch = { [weak self] in
             guard let self else { return }
-            if let error { self.showError(error) }
-            else { self.activeCDURL = nil }
-            self.refreshCDLibrary(busy: false)
+            afterStop?()
+            if let CD {
+                UserDefaults.standard.set(CD.lastPathComponent, forKey: self.selectedCDKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: self.selectedCDKey)
+            }
+            self.toolbar.showActivity(false)
+            self.startVM(disk: disk, CD: CD, restoreSuspendState: false)
         }
+        if bridge.isRunning { bridge.stop(completion: relaunch) }
+        else { relaunch() }
     }
 
     private func confirmDeleteCD(_ url: URL) {
@@ -450,16 +525,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             self.refreshCDLibrary(busy: false)
         }
         guard activeCDURL == url else { removeFile(); return }
-        bridge.ejectCD { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.showError(error)
-                self.refreshCDLibrary(busy: false)
-                return
-            }
-            self.activeCDURL = nil
-            removeFile()
-        }
+        restartVM(with: nil, afterStop: removeFile)
     }
 
     @objc private func showKeyboard() {
@@ -547,8 +613,26 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     @objc private func togglePause() {
-        bridge.setEmulationPaused(!bridge.isPaused)
-        updatePauseButton()
+        guard bridge.isRunning, !isRestartingForCD else { return }
+        if bridge.isPaused {
+            manuallyPaused = false
+            resumeAfterForeground = false
+            discardAutomaticSuspendState()
+            bridge.setEmulationPaused(false)
+            updatePausedAppearance(saving: false)
+            startAudioIfNeeded()
+        } else {
+            keyboardCapture.dismissKeyboard()
+            touchDragActive = false
+            bridge.setLeftMouseButton(false)
+            bridge.setRightMouseButton(false)
+            audio.stop()
+            manuallyPaused = true
+            pauseGeneration += 1
+            bridge.setEmulationPaused(true)
+            updatePausedAppearance(saving: true)
+            saveAutomaticSuspendState(generation: pauseGeneration)
+        }
     }
 
     private func updatePauseButton() {
@@ -556,33 +640,94 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         pauseButton?.setImage(UIImage(systemName: paused ? "play.fill" : "pause.fill"), for: .normal)
         pauseButton?.accessibilityLabel = paused ? "Resume" : "Pause"
     }
-    @objc private func resetVM() { bridge.reset() }
+
+    private func updatePausedAppearance(saving: Bool) {
+        let paused = bridge?.isPaused == true && manuallyPaused
+        pauseOverlay.isHidden = !paused
+        pauseOverlay.setSaving(saving && paused)
+        updatePauseButton()
+    }
+
+    private func saveAutomaticSuspendState(generation: Int, completion: (() -> Void)? = nil) {
+        bridge.saveSuspendState(to: suspendStateURL) { [weak self] error in
+            guard let self else { return }
+            if self.pauseGeneration != generation || !self.manuallyPaused {
+                try? FileManager.default.removeItem(at: self.suspendStateURL)
+            } else if let error {
+                self.showError(error)
+            } else {
+                var stateURL = self.suspendStateURL
+                var values = URLResourceValues()
+                values.isExcludedFromBackup = true
+                try? stateURL.setResourceValues(values)
+            }
+            self.updatePausedAppearance(saving: false)
+            completion?()
+        }
+    }
+
+    private func discardAutomaticSuspendState() {
+        pauseGeneration += 1
+        try? FileManager.default.removeItem(at: suspendStateURL)
+        try? FileManager.default.removeItem(at: suspendStateURL.appendingPathExtension("partial"))
+    }
+
+    @objc private func resetVM() {
+        guard bridge.isRunning else { return }
+        manuallyPaused = false
+        resumeAfterForeground = false
+        discardAutomaticSuspendState()
+        bridge.setEmulationPaused(false)
+        updatePausedAppearance(saving: false)
+        bridge.reset()
+        startAudioIfNeeded()
+    }
 
     @objc private func appDidEnterBackground() {
         guard bridge.isRunning else { return }
         touchDragActive = false
+        keyboardCapture.releaseModifiers()
         bridge.setLeftMouseButton(false)
         bridge.setRightMouseButton(false)
+        audio.stop()
+        finishBackgroundTask()
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Save Windows 95") { [weak self] in
-            guard let self else { return }
-            if self.backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(self.backgroundTask) }
-            self.backgroundTask = .invalid
+            self?.finishBackgroundTask()
         }
-        bridge.setEmulationPaused(true)
-        bridge.flushDisk { [weak self] _ in
-            guard let self else { return }
-            if self.backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(self.backgroundTask) }
-            self.backgroundTask = .invalid
+        if manuallyPaused {
+            updatePausedAppearance(saving: true)
+            saveAutomaticSuspendState(generation: pauseGeneration) { [weak self] in self?.finishBackgroundTask() }
+        } else {
+            resumeAfterForeground = true
+            bridge.setEmulationPaused(true)
+            bridge.flushDisk { [weak self] _ in self?.finishBackgroundTask() }
         }
     }
 
-    @objc private func appWillEnterForeground() { if bridge.isRunning { bridge.setEmulationPaused(false) } }
+    private func finishBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
+    @objc private func appWillEnterForeground() {
+        guard bridge.isRunning else { return }
+        if resumeAfterForeground {
+            resumeAfterForeground = false
+            bridge.setEmulationPaused(false)
+            updatePausedAppearance(saving: false)
+            startAudioIfNeeded()
+        } else {
+            updatePausedAppearance(saving: false)
+        }
+    }
     @objc private func appDidBecomeActive() { becomeFirstResponder() }
 
     private func handleCoreStatus(_ status: String) {
         if status == "Running" || status == "Paused" { updatePauseButton() }
         if status == "Stopped" || status == "Shutdown" { audio.stop() }
         guard status == "Shutdown" else { return }
+        discardAutomaticSuspendState()
         displayLink?.invalidate()
         displayView.isHidden = true
         toolbar.isHidden = true
@@ -647,6 +792,55 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             presenter = presented
         }
         presenter.present(alert, animated: true)
+    }
+}
+
+private final class PauseOverlayView: UIView {
+    private let statusLabel = UILabel()
+    private let detailLabel = UILabel()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = UIColor.black.withAlphaComponent(0.42)
+        isUserInteractionEnabled = true
+
+        let symbol = UIImageView(image: UIImage(systemName: "pause.circle.fill"))
+        symbol.tintColor = .white
+        symbol.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 44, weight: .medium)
+
+        statusLabel.text = "一時停止中"
+        statusLabel.textColor = .white
+        statusLabel.font = .systemFont(ofSize: 21, weight: .semibold)
+        statusLabel.textAlignment = .center
+
+        detailLabel.textColor = UIColor.white.withAlphaComponent(0.78)
+        detailLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        detailLabel.textAlignment = .center
+
+        let stack = UIStackView(arrangedSubviews: [symbol, statusLabel, detailLabel])
+        stack.axis = .vertical
+        stack.alignment = .center
+        stack.spacing = 8
+        stack.isLayoutMarginsRelativeArrangement = true
+        stack.layoutMargins = UIEdgeInsets(top: 18, left: 28, bottom: 18, right: 28)
+        stack.backgroundColor = UIColor(white: 0.08, alpha: 0.86)
+        stack.layer.cornerRadius = 18
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            symbol.widthAnchor.constraint(equalToConstant: 48),
+            symbol.heightAnchor.constraint(equalToConstant: 48),
+            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        setSaving(false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func setSaving(_ saving: Bool) {
+        detailLabel.text = saving ? "状態を保存中…" : "▶ を押すと再開します"
     }
 }
 
@@ -722,7 +916,7 @@ private final class CDLibraryViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         guard section == 1 else { return nil }
-        return "イメージをタップするとD:ドライブへマウントします。左へスワイプすると削除できます。"
+        return "安全のため、CDの挿入・交換・取り出し時はWindowsを再起動します。左へスワイプすると削除できます。"
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
