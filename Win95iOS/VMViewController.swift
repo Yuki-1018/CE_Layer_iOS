@@ -37,8 +37,6 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         }
         return nil
     }
-    private var suspendURL: URL { supportDirectory.appendingPathComponent("suspend.state") }
-
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(white: 0.04, alpha: 1)
@@ -92,12 +90,13 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
         view.addSubview(toolbar)
 
-        toolbar.addButton("⌨︎", target: self, action: #selector(showKeyboard), hint: "Keyboard")
+        let keyboardButton = toolbar.addButton("", target: self, action: #selector(showKeyboard), hint: "Keyboard")
+        let keyboardSymbol = UIImage.SymbolConfiguration(pointSize: 23, weight: .semibold)
+        keyboardButton.setImage(UIImage(systemName: "keyboard", withConfiguration: keyboardSymbol), for: .normal)
         toolbar.addButton("CD", target: self, action: #selector(showCDMenu), hint: "CD images")
         pauseButton = toolbar.addButton("", target: self, action: #selector(togglePause), hint: "Pause")
         updatePauseButton()
         toolbar.addButton("↻", target: self, action: #selector(resetVM), hint: "Reset")
-        toolbar.addButton("•••", target: self, action: #selector(showActions), hint: "More")
 
         keyboardCapture.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(keyboardCapture)
@@ -177,15 +176,12 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         showMissingDisk()
     }
 
-    private func startVM(disk: URL, state: URL? = nil) {
+    private func startVM(disk: URL) {
         activeCDURL = nil
         bridge.start(withDiskURL: disk) { [weak self] error in
             guard let self else { return }
             if let error { self.showError(error); return }
             do { try self.audio.start() } catch { self.showError(error) }
-            if let state, FileManager.default.fileExists(atPath: state.path) {
-                self.bridge.loadState(from: state) { [weak self] error in if let error { self?.showError(error) } }
-            }
         }
     }
 
@@ -204,10 +200,6 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: true)
         picker.delegate = self
         present(picker, animated: true)
-    }
-
-    @objc private func importCD() {
-        presentCDPicker(from: self)
     }
 
     private func presentCDPicker(from presenter: UIViewController) {
@@ -470,7 +462,10 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         }
     }
 
-    @objc private func showKeyboard() { keyboardCapture.becomeFirstResponder() }
+    @objc private func showKeyboard() {
+        if keyboardCapture.isFirstResponder { keyboardCapture.dismissKeyboard() }
+        else { keyboardCapture.becomeFirstResponder() }
+    }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         if !forwardPhysicalKeys(presses, pressed: true) { super.pressesBegan(presses, with: event) }
@@ -485,13 +480,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     private func forwardPhysicalKeys(_ presses: Set<UIPress>, pressed: Bool) -> Bool {
-        var handled = false
-        for press in presses {
-            guard let key = press.key else { continue }
-            let mapped = RetroKey.fromHIDUsage(key.keyCode.rawValue)
-            if let mapped { bridge.sendKey(mapped, pressed: pressed); handled = true }
-        }
-        return handled
+        let keys = RetroKey.orderedKeyCodes(from: presses, pressed: pressed)
+        keys.forEach { bridge.sendKey($0, pressed: pressed) }
+        return !keys.isEmpty
     }
 
     @objc private func trackpadPan(_ recognizer: UIPanGestureRecognizer) {
@@ -567,51 +558,6 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
     @objc private func resetVM() { bridge.reset() }
 
-    @objc private func showActions() {
-        let sheet = UIAlertController(title: "Windows 95", message: nil, preferredStyle: .actionSheet)
-        sheet.addAction(UIAlertAction(title: "Save State", style: .default) { [weak self] _ in self?.saveState() })
-        sheet.addAction(UIAlertAction(title: "Load State", style: .default) { [weak self] _ in self?.loadState() })
-        sheet.addAction(UIAlertAction(title: "CD Images", style: .default) { [weak self] _ in self?.showCDMenu() })
-        sheet.addAction(UIAlertAction(title: "Replace Base Disk", style: .default) { [weak self] _ in self?.replaceDisk() })
-        sheet.addAction(UIAlertAction(title: "Reset Windows Data", style: .destructive) { [weak self] _ in self?.confirmResetWindows() })
-        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        if let popover = sheet.popoverPresentationController { popover.sourceView = toolbar; popover.sourceRect = toolbar.bounds }
-        present(sheet, animated: true)
-    }
-
-    private func saveState() {
-        bridge.saveState(to: suspendURL) { [weak self] error in if let error { self?.showError(error) } }
-    }
-
-    private func loadState() {
-        bridge.loadState(from: suspendURL) { [weak self] error in if let error { self?.showError(error) } }
-    }
-
-    private func replaceDisk() {
-        audio.stop()
-        bridge.stop { [weak self] in self?.importDisk() }
-    }
-
-    private func confirmResetWindows() {
-        let alert = UIAlertController(title: "Reset Windows?", message: "All changes stored in the writable overlay and the save state will be deleted. The base disk is kept.", preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        alert.addAction(UIAlertAction(title: "Reset", style: .destructive) { [weak self] _ in self?.resetWindowsData() })
-        present(alert, animated: true)
-    }
-
-    private func resetWindowsData() {
-        let disk: URL?
-        if let importedDiskURL { disk = importedDiskURL }
-        else { disk = Bundle.main.url(forResource: "win95-base", withExtension: "img", subdirectory: "BundledContent") }
-        audio.stop()
-        bridge.stop { [weak self] in
-            guard let self, let disk else { return }
-            let names = ["win95-base-CDRIVE.sav", "win95-base.pure.zip", "suspend.state"]
-            for name in names { try? FileManager.default.removeItem(at: name == "suspend.state" ? self.suspendURL : self.savesDirectory.appendingPathComponent(name)) }
-            self.startVM(disk: disk)
-        }
-    }
-
     @objc private func appDidEnterBackground() {
         guard bridge.isRunning else { return }
         touchDragActive = false
@@ -622,10 +568,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             if self.backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(self.backgroundTask) }
             self.backgroundTask = .invalid
         }
-        bridge.saveState(to: suspendURL) { [weak self] _ in
+        bridge.setEmulationPaused(true)
+        bridge.flushDisk { [weak self] _ in
             guard let self else { return }
-            self.bridge.flushDisk()
-            self.bridge.setEmulationPaused(true)
             if self.backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(self.backgroundTask) }
             self.backgroundTask = .invalid
         }
@@ -865,6 +810,7 @@ private final class FloatingMenuView: UIView {
     private var hasInitialPosition = false
     private var expandedWidth: CGFloat = 360
     private let menuHeight: CGFloat = 48
+    private let controlWidth: CGFloat = 43
 
     override init(frame: CGRect) {
         super.init(frame: CGRect(x: 0, y: 0, width: menuHeight, height: menuHeight))
@@ -875,7 +821,7 @@ private final class FloatingMenuView: UIView {
         clipsToBounds = true
         accessibilityLabel = "VM controls"
 
-        handleButton.setImage(UIImage(systemName: "ellipsis"), for: .normal)
+        handleButton.setImage(UIImage(systemName: "line.3.horizontal"), for: .normal)
         handleButton.tintColor = .white
         handleButton.accessibilityLabel = "Open controls"
         handleButton.addTarget(self, action: #selector(toggleCollapsed), for: .touchUpInside)
@@ -885,7 +831,7 @@ private final class FloatingMenuView: UIView {
         handleButton.addGestureRecognizer(moveGesture)
 
         scrollView.showsHorizontalScrollIndicator = false
-        scrollView.alwaysBounceHorizontal = true
+        scrollView.alwaysBounceHorizontal = false
         addSubview(scrollView)
 
         buttonStack.axis = .horizontal
@@ -918,7 +864,7 @@ private final class FloatingMenuView: UIView {
         button.titleLabel?.font = .systemFont(ofSize: title.count > 2 ? 13 : 17, weight: .semibold)
         button.accessibilityLabel = hint
         button.addTarget(target, action: action, for: .touchUpInside)
-        button.widthAnchor.constraint(equalToConstant: 43).isActive = true
+        button.widthAnchor.constraint(equalToConstant: controlWidth).isActive = true
         buttonStack.addArrangedSubview(button)
         return button
     }
@@ -929,7 +875,10 @@ private final class FloatingMenuView: UIView {
 
     func place(in containerBounds: CGRect, safeAreaInsets: UIEdgeInsets) {
         guard let superview else { return }
-        expandedWidth = min(370, max(220, containerBounds.width - safeAreaInsets.left - safeAreaInsets.right - 16))
+        let buttonCount = CGFloat(buttonStack.arrangedSubviews.count)
+        let controlsWidth = buttonCount * controlWidth + max(0, buttonCount - 1) * buttonStack.spacing
+        let availableWidth = containerBounds.width - safeAreaInsets.left - safeAreaInsets.right - 16
+        expandedWidth = max(menuHeight, min(availableWidth, menuHeight + controlsWidth))
         let targetWidth = isCollapsed ? menuHeight : expandedWidth
         if bounds.size != CGSize(width: targetWidth, height: menuHeight) {
             bounds.size = CGSize(width: targetWidth, height: menuHeight)
@@ -968,7 +917,7 @@ private final class FloatingMenuView: UIView {
         if isCollapsed, let superview { opensToLeft = center.x > superview.bounds.midX }
         isCollapsed.toggle()
         let width = isCollapsed ? menuHeight : expandedWidth
-        handleButton.setImage(UIImage(systemName: isCollapsed ? "ellipsis" : "chevron.left"), for: .normal)
+        handleButton.setImage(UIImage(systemName: isCollapsed ? "line.3.horizontal" : "chevron.left"), for: .normal)
         handleButton.accessibilityLabel = isCollapsed ? "Open controls" : "Collapse controls"
         UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .curveEaseInOut]) {
             self.bounds.size.width = width

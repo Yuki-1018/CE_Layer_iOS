@@ -1,13 +1,13 @@
 # CE_Layer_iOS — Windows 95 fixed machine for iPhone / iPad
 
-Windows 95 を「互換レイヤー」ではなく、x86 PC として iOS 上で動かす専用アプリです。汎用 VM 作成画面は持たず、Pentium-class / 64 MB RAM / S3 SVGA / Sound Blaster 16 / IDE という固定構成で、ユーザー所有のセットアップ済み Windows 95 HDD を直接起動します。
+Windows 95 を「互換レイヤー」ではなく、x86 PC として iOS 上で動かす専用アプリです。汎用 VM 作成画面は持たず、Pentium MMX / 128 MB RAM / S3 SVGA / Sound Blaster 16 / IDE という固定構成で、ユーザー所有のセットアップ済み Windows 95 HDD を直接起動します。
 
 GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリタ版コアをビルドし、コード署名なしの `Win95iOS-unsigned.ipa` を Artifact に出力します。
 
 ## 実装済み
 
 - DOSBox Pure の x86 interpreter を固定コミットからビルド（JIT/dynarec 無効）
-- Pentium slow、64 MB、約 Pentium 100 MHz 相当、S3 Trio64、SB16 の固定オプション
+- Pentium MMX 命令セット、128 MB、約 Pentium II 300 MHz 相当（実験設定）、S3 Trio64、SB16 の固定オプション
 - raw `.img` / `.vhd` の BIOS 自動起動（DOSBox Pure のスタートメニューを表示しない）
 - 512-byte sector 単位の永続 differencing disk
 - base HDD は変更せず、変更 sector のみ `win95-base-CDRIVE.sav` に保存
@@ -17,11 +17,11 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - 画面内を移動できる折りたたみ式コンパクト操作メニュー
 - タッチトラックパッド、長押しドラッグ、2本指右クリック／スクロール
 - iOS ソフトウェアキーボード、USB/Bluetooth HID 物理キーボード、外部マウス／トラックパッド
-- UTM 型の特殊キーバー（修飾キー、Esc、Tab、矢印、F1〜F12、編集・ロックキー）
+- UTM 型の特殊キーバー（Win/Ctrl/Alt/Shiftと文字・特殊キーの同時押し、Esc、Tab、矢印、F1〜F12、編集・ロックキー）
 - 複数 ISO/CUE/CHD の保存、専用一覧からの追加・mount・eject・削除（大容量イメージのストリーミング取込）
-- 別アイコンで判別できる pause/resume、hardware reset、save/load state、Windows データ初期化
+- 別アイコンで判別できる pause/resume と hardware reset
 - Windows の正常な shutdown を検出したら DOSBox Pure のメニューを出さずアプリを終了
-- background 移行時の state 保存と HDD overlay flush
+- background 移行時と正常終了時の HDD overlay flush
 - iPhone / iPad 共通 UI
 
 ## Windows 95 イメージについて
@@ -96,7 +96,6 @@ iOS 側の主な保存先:
 ```text
 Application Support/Win95/
 ├── win95-base.img / .vhd       # Files picker から取り込んだ場合のみ
-├── suspend.state
 ├── CDs/
 │   ├── install-disc-1.iso
 │   └── install-disc-2.iso
@@ -105,12 +104,14 @@ Application Support/Win95/
 └── System/
 ```
 
-通常の reset / power cycle では overlay を消しません。「Reset Windows Data」だけが overlay と save state を削除します。
+通常の reset / power cycle でも overlay は維持されます。Windowsの書き込みはbackground移行時と正常終了時にも明示的にflushされます。
 
 ## 操作
 
-- 右上の `•••` をタップ: コンパクトメニューを展開／折りたたみ
-- `•••` をドラッグ: メニューを画面内の任意位置へ移動
+- 右上の `≡` をタップ: コンパクトメニューを展開／折りたたみ
+- `≡` をドラッグ: メニューを画面内の任意位置へ移動
+- キーボードアイコン: ソフトウェアキーボードを表示／非表示
+- 特殊キーバーの Win/Ctrl/Alt/Shift: 選択後に文字または特殊キーを押すと同時押しとして送信
 - `CD`: CD-ROM 管理画面を開く。保存済みイメージのタップで mount、`CDを取り出す` で eject、左スワイプで削除
 - `⏸` / `▶`: Windows の一時停止／再開（現在実行できる操作のアイコンを表示）
 - 1本指ドラッグ: マウスカーソル移動
@@ -124,7 +125,6 @@ Application Support/Win95/
 
 - DOSBox Pure が提供する NE2000 は guest から検出できますが、この専用 frontend はインターネット向け user-mode NAT をまだ接続していません。
 - Win95 の CPU 負荷は高く、古い端末では実時間速度に届かない場合があります。iOS の実行コード制限に抵触しないよう JIT は意図的に使用していません。
-- save state は core revision、CPU、RAM、video 設定に依存します。アプリ更新後に互換性がない場合は通常 boot を使用してください。
 - Windows の shutdown 完了時は HDD overlay を flush してからアプリが自動終了します。
 
 ## ライセンス

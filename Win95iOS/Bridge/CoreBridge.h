@@ -29,9 +29,8 @@ typedef void (^Win95Completion)(NSError * _Nullable error);
 - (void)setEmulationPaused:(BOOL)paused;
 - (void)reset;
 - (void)flushDisk;
+- (void)flushDiskWithCompletion:(Win95Completion)completion NS_SWIFT_NAME(flushDisk(completion:));
 
-- (void)saveStateToURL:(NSURL *)url completion:(Win95Completion)completion;
-- (void)loadStateFromURL:(NSURL *)url completion:(Win95Completion)completion;
 - (void)mountCDAtURL:(NSURL *)url completion:(Win95Completion)completion;
 - (void)ejectCDWithCompletion:(Win95Completion)completion NS_SWIFT_NAME(ejectCD(completion:));
 

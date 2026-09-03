@@ -14,6 +14,8 @@
 
 extern "C" void dbp_win95_flush_disk(void);
 extern "C" bool dbp_win95_guest_shutdown(void);
+extern "C" bool dbp_win95_mount_cd(const char *path);
+extern "C" bool dbp_win95_eject_cd(void);
 
 static NSString * const Win95CoreErrorDomain = @"Win95Core";
 
@@ -31,7 +33,7 @@ static NSString * const Win95CoreErrorDomain = @"Win95Core";
 
 namespace {
 
-enum class PendingOperation { None, Save, Load, MountCD, EjectCD, Flush };
+enum class PendingOperation { None, MountCD, EjectCD, Flush };
 
 struct Operation {
     PendingOperation kind = PendingOperation::None;
@@ -41,8 +43,6 @@ struct Operation {
 
 static __weak Win95CoreBridge *gBridge;
 static std::atomic<retro_keyboard_event_t> gKeyboardCallback{nullptr};
-static retro_disk_control_ext_callback gDiskControl = {};
-static bool gHasDiskControl = false;
 
 static NSError *CoreError(NSInteger code, NSString *description) {
     return [NSError errorWithDomain:Win95CoreErrorDomain
@@ -89,8 +89,6 @@ static void CoreLog(enum retro_log_level level, const char *format, ...) {
 
     std::mutex _operationMutex;
     std::deque<Operation> _operations;
-    std::unordered_map<std::string, unsigned> _cdImageIndices;
-    int _activeCDIndex;
 
     std::string _saveDirectory;
     std::string _systemDirectory;
@@ -145,26 +143,25 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         _videoWidth = _videoHeight = _videoPitch = 0;
         _videoAspectRatio = 4.0 / 3.0;
         _videoGeneration = 0;
-        _activeCDIndex = -1;
         _saveDirectory = saveDirectory.fileSystemRepresentation;
         _systemDirectory = systemDirectory.fileSystemRepresentation;
         _options = {
             {"dosbox_pure_force60fps", "true"},
-            {"dosbox_pure_savestate", "on"},
+            {"dosbox_pure_savestate", "disabled"},
             {"dosbox_pure_strict_mode", "false"},
             {"dosbox_pure_conf", "false"},
             {"dosbox_pure_menu_time", "0"},
             {"dosbox_pure_mouse_input", "true"},
             {"dosbox_pure_mouse_speed_factor", "1.0"},
-            {"dosbox_pure_cycles", "77000"},
-            {"dosbox_pure_cycles_max", "77000"},
+            {"dosbox_pure_cycles", "200000"},
+            {"dosbox_pure_cycles_max", "200000"},
             {"dosbox_pure_machine", "svga"},
             {"dosbox_pure_svga", "svga_s3"},
             {"dosbox_pure_svgamem", "2"},
             {"dosbox_pure_voodoo", "off"},
             {"dosbox_pure_voodoo_perf", "0"},
-            {"dosbox_pure_memory_size", "64"},
-            {"dosbox_pure_cpu_type", "pentium_slow"},
+            {"dosbox_pure_memory_size", "128"},
+            {"dosbox_pure_cpu_type", "pentium_mmx"},
             {"dosbox_pure_cpu_core", "normal"},
             {"dosbox_pure_bootos_ramdisk", "diff"},
             {"dosbox_pure_bootos_forcenormal", "true"},
@@ -201,9 +198,6 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
     @autoreleasepool {
         gBridge = self;
         gKeyboardCallback = nullptr;
-        gHasDiskControl = false;
-        _cdImageIndices.clear();
-        _activeCDIndex = -1;
         _contentPath = path.fileSystemRepresentation;
         _contentPath += "#I*SVGA (Super Video Graphics Array)";
 
@@ -219,9 +213,6 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         if (!retro_load_game(&game)) {
             retro_deinit();
             gKeyboardCallback = nullptr;
-            gHasDiskControl = false;
-            _cdImageIndices.clear();
-            _activeCDIndex = -1;
             gBridge = nil;
             _running = false;
             [self finishOperation:completion error:CoreError(2, @"DOSBox Pure could not load the disk image.")];
@@ -264,9 +255,6 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         retro_unload_game();
         retro_deinit();
         gKeyboardCallback = nullptr;
-        gHasDiskControl = false;
-        _cdImageIndices.clear();
-        _activeCDIndex = -1;
         gBridge = nil;
         _running = false;
         _paused = false;
@@ -289,7 +277,10 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
     if (self.statusHandler) dispatch_async(dispatch_get_main_queue(), ^{ self.statusHandler(paused ? @"Paused" : @"Running"); });
 }
 
-- (void)reset { _resetRequested = true; }
+- (void)reset {
+    [self flushDisk];
+    _resetRequested = true;
+}
 
 - (void)enqueueOperation:(Operation)operation {
     std::lock_guard<std::mutex> lock(_operationMutex);
@@ -300,14 +291,9 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
     if (_running.load()) [self enqueueOperation:Operation{PendingOperation::Flush, {}, nil}];
 }
 
-- (void)saveStateToURL:(NSURL *)url completion:(Win95Completion)completion {
+- (void)flushDiskWithCompletion:(Win95Completion)completion {
     if (!_running.load()) { [self finishOperation:completion error:CoreError(8, @"The virtual machine is not running.")]; return; }
-    [self enqueueOperation:Operation{PendingOperation::Save, url.fileSystemRepresentation, [completion copy]}];
-}
-
-- (void)loadStateFromURL:(NSURL *)url completion:(Win95Completion)completion {
-    if (!_running.load()) { [self finishOperation:completion error:CoreError(8, @"The virtual machine is not running.")]; return; }
-    [self enqueueOperation:Operation{PendingOperation::Load, url.fileSystemRepresentation, [completion copy]}];
+    [self enqueueOperation:Operation{PendingOperation::Flush, {}, [completion copy]}];
 }
 
 - (void)mountCDAtURL:(NSURL *)url completion:(Win95Completion)completion {
@@ -332,75 +318,14 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             case PendingOperation::Flush:
                 dbp_win95_flush_disk();
                 break;
-            case PendingOperation::Save: {
-                dbp_win95_flush_disk();
-                size_t size = retro_serialize_size();
-                std::vector<uint8_t> bytes(size);
-                if (!size || !retro_serialize(bytes.data(), bytes.size())) error = CoreError(3, @"The VM state could not be serialized.");
-                else {
-                    NSData *data = [NSData dataWithBytes:bytes.data() length:bytes.size()];
-                    NSString *path = [NSString stringWithUTF8String:operation.path.c_str()];
-                    if (![data writeToFile:path options:NSDataWritingAtomic error:&error]) error = error ?: CoreError(4, @"The VM state could not be written.");
-                }
-                break;
-            }
-            case PendingOperation::Load: {
-                NSString *path = [NSString stringWithUTF8String:operation.path.c_str()];
-                NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:&error];
-                if (data && !retro_unserialize(data.bytes, data.length)) error = CoreError(5, @"This save state is invalid or incompatible.");
-                break;
-            }
             case PendingOperation::MountCD: {
-                if (!gHasDiskControl || !gDiskControl.set_eject_state || !gDiskControl.get_eject_state || !gDiskControl.set_image_index ||
-                    !gDiskControl.get_num_images || !gDiskControl.add_image_index || !gDiskControl.replace_image_index) {
-                    error = CoreError(6, @"CD-ROM control is unavailable.");
-                    break;
-                }
-
-                unsigned index = 0;
-                auto existing = _cdImageIndices.find(operation.path);
-                if (existing != _cdImageIndices.end()) {
-                    index = existing->second;
-                }
-
-                if (_activeCDIndex >= 0 && (existing == _cdImageIndices.end() || _activeCDIndex != (int)index)) {
-                    if (!gDiskControl.set_image_index((unsigned)_activeCDIndex) ||
-                        !gDiskControl.set_eject_state(true) || !gDiskControl.get_eject_state()) {
-                        error = CoreError(7, @"The current CD image could not be ejected.");
-                        break;
-                    }
-                    _activeCDIndex = -1;
-                }
-
-                if (existing == _cdImageIndices.end()) {
-                    index = gDiskControl.get_num_images();
-                    retro_game_info info = {};
-                    info.path = operation.path.c_str();
-                    if (!gDiskControl.add_image_index() || !gDiskControl.set_image_index(index) ||
-                        !gDiskControl.replace_image_index(index, &info)) {
-                        error = CoreError(7, @"The CD image could not be registered.");
-                        break;
-                    }
-                    _cdImageIndices.emplace(operation.path, index);
-                }
-                if (!gDiskControl.set_image_index(index) || !gDiskControl.set_eject_state(false) || gDiskControl.get_eject_state()) {
+                if (!dbp_win95_mount_cd(operation.path.c_str())) {
                     error = CoreError(7, @"The CD image could not be mounted.");
-                    break;
                 }
-                _activeCDIndex = (int)index;
                 break;
             }
             case PendingOperation::EjectCD:
-                if (_activeCDIndex >= 0) {
-                    if (!gHasDiskControl || !gDiskControl.set_image_index || !gDiskControl.set_eject_state || !gDiskControl.get_eject_state) {
-                        error = CoreError(6, @"CD-ROM control is unavailable.");
-                    } else if (!gDiskControl.set_image_index((unsigned)_activeCDIndex) ||
-                               !gDiskControl.set_eject_state(true) || !gDiskControl.get_eject_state()) {
-                        error = CoreError(7, @"The current CD image could not be ejected.");
-                    } else {
-                        _activeCDIndex = -1;
-                    }
-                }
+                if (!dbp_win95_eject_cd()) error = CoreError(7, @"The current CD image could not be ejected.");
                 break;
             case PendingOperation::None:
                 break;
@@ -513,7 +438,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         case RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK:
             gKeyboardCallback.store(static_cast<retro_keyboard_callback *>(data)->callback); return true;
         case RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE:
-            gDiskControl = *static_cast<retro_disk_control_ext_callback *>(data); gHasDiskControl = true; return true;
+            return true;
         case RETRO_ENVIRONMENT_GET_DISK_CONTROL_INTERFACE_VERSION:
             *(unsigned *)data = 1; return true;
         case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:

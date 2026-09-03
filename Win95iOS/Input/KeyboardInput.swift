@@ -53,6 +53,29 @@ enum RetroKey {
     static let menu: UInt32 = 319
     static let power: UInt32 = 320
 
+    static func isModifier(_ key: UInt32) -> Bool {
+        switch key {
+        case leftShift, rightShift, leftControl, rightControl, leftAlt, rightAlt, leftSuper, rightSuper:
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func orderedKeyCodes(from presses: Set<UIPress>, pressed: Bool) -> [UInt32] {
+        presses.compactMap { press in
+            guard let key = press.key else { return nil }
+            return fromHIDUsage(key.keyCode.rawValue)
+        }.sorted { left, right in
+            let leftIsModifier = isModifier(left)
+            let rightIsModifier = isModifier(right)
+            if leftIsModifier != rightIsModifier {
+                return pressed ? leftIsModifier : !leftIsModifier
+            }
+            return left < right
+        }
+    }
+
     static func fromHIDUsage(_ usage: Int) -> UInt32? {
         if (4...29).contains(usage) { return UInt32(usage - 4 + 97) }
         if (30...38).contains(usage) { return UInt32(usage - 30 + 49) }
@@ -126,8 +149,7 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
         let view = SpecialKeyAccessoryView()
         view.sendKey = sendKey
         view.hideKeyboard = { [weak self] in
-            self?.resignFirstResponder()
-            self?.keyboardDidHide?()
+            self?.dismissKeyboard()
         }
         view.pasteText = { [weak self] in
             guard let text = UIPasteboard.general.string else { return }
@@ -170,13 +192,9 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
     }
 
     private func forwardPhysicalKeys(_ presses: Set<UIPress>, pressed: Bool) -> Bool {
-        var handled = false
-        for press in presses {
-            guard let key = press.key, let mapped = RetroKey.fromHIDUsage(key.keyCode.rawValue) else { continue }
-            sendKey?(mapped, pressed)
-            handled = true
-        }
-        return handled
+        let keys = RetroKey.orderedKeyCodes(from: presses, pressed: pressed)
+        keys.forEach { sendKey?($0, pressed) }
+        return !keys.isEmpty
     }
 
     func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
@@ -205,14 +223,21 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
             key = UInt32(Array(unshifted.utf8)[offset])
             shift = true
         }
-        if shift { sendKey?(RetroKey.leftShift, true) }
+        let synthesizeShift = shift && !accessory.isModifierActive(RetroKey.leftShift) && !accessory.isModifierActive(RetroKey.rightShift)
+        if synthesizeShift { sendKey?(RetroKey.leftShift, true) }
         tap(key)
-        if shift { sendKey?(RetroKey.leftShift, false) }
+        if synthesizeShift { sendKey?(RetroKey.leftShift, false) }
     }
 
     private func tap(_ key: UInt32) {
         sendKey?(key, true)
         sendKey?(key, false)
+    }
+
+    func dismissKeyboard() {
+        accessory.releaseModifiers()
+        resignFirstResponder()
+        keyboardDidHide?()
     }
 }
 
@@ -353,6 +378,10 @@ private final class SpecialKeyAccessoryView: UIView {
             button.isSelected = false
             button.updateAppearance()
         }
+    }
+
+    func isModifierActive(_ key: UInt32) -> Bool {
+        modifierButtons[key]?.isSelected == true
     }
 
     @objc private func pastePressed() { pasteText?() }
