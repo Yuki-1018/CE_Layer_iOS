@@ -9,6 +9,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private let pauseOverlay = PauseOverlayView()
     private let toolbar = FloatingMenuView()
     private let keyboardCapture = KeyboardCaptureView()
+    private let diskSetupView = DiskSetupView()
     private lazy var physicalKeyboard = PhysicalKeyboardInput { [weak self] key, pressed in
         self?.bridge.sendKey(key, pressed: pressed)
     }
@@ -131,6 +132,11 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
         keyboardCapture.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(keyboardCapture)
+
+        diskSetupView.translatesAutoresizingMaskIntoConstraints = false
+        diskSetupView.isHidden = true
+        diskSetupView.onSelectImage = { [weak self] in self?.importDisk() }
+        view.addSubview(diskSetupView)
         NSLayoutConstraint.activate([
             displayView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             displayView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -143,7 +149,11 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             keyboardCapture.widthAnchor.constraint(equalToConstant: 1),
             keyboardCapture.heightAnchor.constraint(equalToConstant: 1),
             keyboardCapture.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            keyboardCapture.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            keyboardCapture.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            diskSetupView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            diskSetupView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            diskSetupView.topAnchor.constraint(equalTo: view.topAnchor),
+            diskSetupView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(trackpadPan(_:)))
@@ -244,7 +254,12 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             guard let self else { return }
             self.toolbar.showActivity(false)
             self.refreshCDLibrary(busy: false)
-            if let error { self.showError(error); return }
+            if let error {
+                self.diskSetupView.setBusy(false)
+                self.showError(error)
+                return
+            }
+            self.hideMissingDisk()
             if restoreSuspendState, FileManager.default.fileExists(atPath: self.suspendStateURL.path) {
                 self.restoreAutomaticSuspendState()
             } else {
@@ -284,13 +299,18 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     private func showMissingDisk() {
-        let alert = UIAlertController(
-            title: "Windows 95 disk required",
-            message: "Select a raw .img or .vhd disk image containing your licensed, already-installed Windows 95 system. The image is copied into the app; changes are stored in a separate sector overlay.",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "Select Disk", style: .default) { [weak self] _ in self?.importDisk() })
-        present(alert, animated: true)
+        keyboardCapture.dismissKeyboard()
+        pauseOverlay.isHidden = true
+        toolbar.isHidden = true
+        diskSetupView.setBusy(false)
+        diskSetupView.isHidden = false
+        view.bringSubviewToFront(diskSetupView)
+    }
+
+    private func hideMissingDisk() {
+        diskSetupView.setBusy(false)
+        diskSetupView.isHidden = true
+        toolbar.isHidden = false
     }
 
     @objc private func importDisk() {
@@ -313,11 +333,16 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         case .disk:
             guard let source = urls.first else { return }
             let ext = source.pathExtension.lowercased()
-            guard ext == "img" || ext == "vhd" else { showError(NSError(domain: "Win95UI", code: 1, userInfo: [NSLocalizedDescriptionKey: "Select a raw .img or .vhd disk image."])); return }
+            guard ext == "img" || ext == "vhd" else {
+                diskSetupView.setBusy(false)
+                showError(NSError(domain: "Win95UI", code: 1, userInfo: [NSLocalizedDescriptionKey: "raw形式の .img または .vhd ディスクイメージを選択してください。"]))
+                return
+            }
+            diskSetupView.setBusy(true)
             do {
                 let size = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
                 guard size >= 10 * 1024 * 1024, size % 512 == 0 else {
-                    throw NSError(domain: "Win95UI", code: 2, userInfo: [NSLocalizedDescriptionKey: "The disk must be at least 10 MB and use a size divisible by 512 bytes."])
+                    throw NSError(domain: "Win95UI", code: 2, userInfo: [NSLocalizedDescriptionKey: "ディスクイメージは10 MB以上で、ファイルサイズが512バイトの倍数である必要があります。"])
                 }
                 for oldExtension in ["img", "vhd"] {
                     let oldURL = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(oldExtension)
@@ -333,10 +358,17 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 } else {
                     startVM(disk: destination, CD: nil, restoreSuspendState: false)
                 }
-            } catch { showError(error) }
+            } catch {
+                diskSetupView.setBusy(false)
+                showError(error)
+            }
         case .cd:
             importCDImages(urls)
         }
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        if pendingImport == .disk { diskSetupView.setBusy(false) }
     }
 
     private func importCDImages(_ sources: [URL]) {
@@ -829,6 +861,142 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             presenter = presented
         }
         presenter.present(alert, animated: true)
+    }
+}
+
+private final class DiskSetupView: UIView {
+    var onSelectImage: (() -> Void)?
+
+    private let selectButton = UIButton(type: .system)
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = UIColor(red: 0.035, green: 0.045, blue: 0.065, alpha: 1)
+        isUserInteractionEnabled = true
+
+        let symbol = UIImageView(image: UIImage(systemName: "externaldrive.badge.plus"))
+        symbol.tintColor = .systemBlue
+        symbol.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 48, weight: .medium)
+        symbol.contentMode = .scaleAspectFit
+
+        let titleLabel = UILabel()
+        titleLabel.text = "Windows 95 イメージを選択"
+        titleLabel.textColor = .white
+        titleLabel.font = .systemFont(ofSize: 27, weight: .bold)
+        titleLabel.adjustsFontForContentSizeCategory = true
+        titleLabel.textAlignment = .center
+        titleLabel.numberOfLines = 0
+
+        let descriptionLabel = UILabel()
+        descriptionLabel.text = "セットアップ済みの Windows 95 が入ったディスクイメージを選択してください。"
+        descriptionLabel.textColor = UIColor.white.withAlphaComponent(0.82)
+        descriptionLabel.font = .systemFont(ofSize: 16, weight: .regular)
+        descriptionLabel.adjustsFontForContentSizeCategory = true
+        descriptionLabel.textAlignment = .center
+        descriptionLabel.numberOfLines = 0
+
+        let formatLabel = UILabel()
+        formatLabel.text = "対応形式: raw IMG / VHD  •  10 MB以上"
+        formatLabel.textColor = UIColor.white.withAlphaComponent(0.62)
+        formatLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        formatLabel.adjustsFontForContentSizeCategory = true
+        formatLabel.textAlignment = .center
+        formatLabel.numberOfLines = 0
+
+        var buttonConfiguration = UIButton.Configuration.filled()
+        buttonConfiguration.title = "イメージを選択"
+        buttonConfiguration.image = UIImage(systemName: "folder")
+        buttonConfiguration.imagePadding = 9
+        buttonConfiguration.cornerStyle = .large
+        buttonConfiguration.baseBackgroundColor = .systemBlue
+        buttonConfiguration.baseForegroundColor = .white
+        buttonConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 14, leading: 22, bottom: 14, trailing: 22)
+        selectButton.configuration = buttonConfiguration
+        selectButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        selectButton.addTarget(self, action: #selector(selectImage), for: .touchUpInside)
+        selectButton.accessibilityLabel = "Windows 95 ディスクイメージを選択"
+
+        let storageLabel = UILabel()
+        storageLabel.text = "選択したイメージはアプリ内へコピーされます。Windowsによる変更内容は別の保存データへ記録されるため、ベースイメージは変更されません。"
+        storageLabel.textColor = UIColor.white.withAlphaComponent(0.52)
+        storageLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        storageLabel.adjustsFontForContentSizeCategory = true
+        storageLabel.textAlignment = .center
+        storageLabel.numberOfLines = 0
+
+        let stack = UIStackView(arrangedSubviews: [symbol, titleLabel, descriptionLabel, formatLabel, selectButton, storageLabel])
+        stack.axis = .vertical
+        stack.alignment = .fill
+        stack.spacing = 14
+        stack.setCustomSpacing(20, after: symbol)
+        stack.setCustomSpacing(22, after: formatLabel)
+        stack.setCustomSpacing(18, after: selectButton)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let card = UIView()
+        card.backgroundColor = UIColor(white: 0.10, alpha: 0.94)
+        card.layer.cornerRadius = 24
+        card.layer.cornerCurve = .continuous
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+
+        let scrollView = UIScrollView()
+        scrollView.alwaysBounceVertical = false
+        scrollView.showsVerticalScrollIndicator = true
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scrollView)
+
+        let contentView = UIView()
+        contentView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(contentView)
+        contentView.addSubview(card)
+
+        let preferredWidth = card.widthAnchor.constraint(equalToConstant: 520)
+        preferredWidth.priority = .defaultHigh
+        let verticalCenter = card.centerYAnchor.constraint(equalTo: contentView.centerYAnchor)
+        verticalCenter.priority = .defaultHigh
+        let fillHeight = contentView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor)
+        fillHeight.priority = .defaultLow
+        NSLayoutConstraint.activate([
+            symbol.heightAnchor.constraint(equalToConstant: 54),
+            selectButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 50),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 28),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -28),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 28),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -28),
+            scrollView.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor),
+            contentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            contentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            contentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            contentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+            fillHeight,
+            card.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            verticalCenter,
+            preferredWidth,
+            card.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 20),
+            card.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -20),
+            card.topAnchor.constraint(greaterThanOrEqualTo: contentView.topAnchor, constant: 16),
+            card.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -16)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func selectImage() {
+        onSelectImage?()
+    }
+
+    func setBusy(_ busy: Bool) {
+        selectButton.isEnabled = !busy
+        var configuration = selectButton.configuration
+        configuration?.title = busy ? "イメージを読み込み中…" : "イメージを選択"
+        configuration?.image = busy ? nil : UIImage(systemName: "folder")
+        configuration?.showsActivityIndicator = busy
+        selectButton.configuration = configuration
     }
 }
 

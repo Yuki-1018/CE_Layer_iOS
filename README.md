@@ -9,6 +9,7 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - DOSBox Pure の x86 interpreter を固定コミットからビルド（JIT/dynarec 無効）
 - Pentium MMX 命令セット、128 MB、実機で60 fpsを維持しやすい77000 cycles、S3 Trio64、SB16 の固定オプション
 - raw `.img` / `.vhd` の BIOS 自動起動（DOSBox Pure のスタートメニューを表示しない）
+- 初回起動時やベースイメージ未配置時に表示する、iPhone横向きにも対応したイメージ選択画面
 - 512-byte sector 単位の永続 differencing disk
 - base HDD は変更せず、変更 sector のみ `win95-base-CDRIVE.sav` に保存
 - Metal による XRGB8888 framebuffer 表示
@@ -30,7 +31,7 @@ Windows 95 は Microsoft の著作物であり、このリポジトリには含�
 
 選択肢は2つです。
 
-1. アプリ起動後に `.img` または `.vhd` を Files picker から選ぶ（推奨）。イメージは「このiPhone/iPad内」→アプリ名→`Win95` へコピーされます。
+1. 初回起動時に表示されるセットアップ画面から `.img` または `.vhd` を Files picker で選ぶ（推奨）。イメージは「このiPhone/iPad内」→アプリ名→`Win95` へコピーされます。後からベースイメージを削除した場合も、次回起動時に同じ画面へ戻ります。
 2. 自分専用の private fork / local checkout で `Win95iOS/BundledContent/win95-base.img` を置いてからビルドする。`.gitignore` 対象なので、誤って公開しないよう注意してください。
 
 推奨 guest 設定:
