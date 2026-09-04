@@ -12,7 +12,11 @@ and this repository contains the complete local patch in
 The upstream `LICENSE`, `DOSBOX-AUTHORS`, and `DOSBOX-THANKS` files are copied
 into the application during the build.
 
+The iOS physical-keyboard connection design was informed by dospad commit
+`2e329c69913a1e3e58a9e12a089d079469521749`, which uses `GCKeyboard` to send
+HID key transitions to its emulator. dospad is GPL-2.0 licensed and is
+available at <https://github.com/litchie/dospad>. No dospad binary is linked.
+
 Microsoft Windows 95 is not part of this repository and is not licensed or
 distributed by this project. Users must supply their own lawfully licensed,
 already-installed disk image.
-

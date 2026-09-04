@@ -19,6 +19,7 @@
 extern "C" void dbp_win95_flush_disk(void);
 extern "C" bool dbp_win95_guest_shutdown(void);
 extern "C" void dbp_win95_set_initial_cd(const char *path);
+extern "C" void dbp_win95_send_key(unsigned keycode, bool pressed);
 extern "C" void dbp_win95_release_input(void);
 
 static NSString * const Win95CoreErrorDomain = @"Win95Core";
@@ -51,7 +52,6 @@ struct Operation {
 };
 
 static __weak Win95CoreBridge *gBridge;
-static std::atomic<retro_keyboard_event_t> gKeyboardCallback{nullptr};
 
 static NSError *CoreError(NSInteger code, NSString *description) {
     return [NSError errorWithDomain:Win95CoreErrorDomain
@@ -263,7 +263,6 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
 - (void)runDiskPath:(NSString *)path CDPath:(NSString *)CDPath completion:(Win95Completion)completion {
     @autoreleasepool {
         gBridge = self;
-        gKeyboardCallback = nullptr;
         _contentPath = path.fileSystemRepresentation;
         _contentPath += "#I*SVGA (Super Video Graphics Array)";
         dbp_win95_set_initial_cd(CDPath ? CDPath.fileSystemRepresentation : nullptr);
@@ -279,7 +278,6 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         game.path = _contentPath.c_str();
         if (!retro_load_game(&game)) {
             retro_deinit();
-            gKeyboardCallback = nullptr;
             gBridge = nil;
             _running = false;
             [self finishOperation:completion error:CoreError(2, @"DOSBox Pure could not load the disk image.")];
@@ -325,7 +323,6 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         dbp_win95_flush_disk();
         retro_unload_game();
         retro_deinit();
-        gKeyboardCallback = nullptr;
         gBridge = nil;
         _running = false;
         _paused = false;
@@ -478,9 +475,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         std::lock_guard<std::mutex> lock(_inputMutex);
         events.swap(_keyEvents);
     }
-    retro_keyboard_event_t callback = gKeyboardCallback.load();
-    if (!callback) return;
-    for (const KeyEvent &event : events) callback(event.pressed, event.keyCode, 0, 0);
+    for (const KeyEvent &event : events) dbp_win95_send_key(event.keyCode, event.pressed);
 }
 
 - (void)addMouseDeltaX:(NSInteger)deltaX deltaY:(NSInteger)deltaY {
@@ -546,7 +541,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
             return *(retro_pixel_format *)data == RETRO_PIXEL_FORMAT_XRGB8888;
         case RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK:
-            gKeyboardCallback.store(static_cast<retro_keyboard_callback *>(data)->callback); return true;
+            return true;
         case RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE:
             return true;
         case RETRO_ENVIRONMENT_GET_DISK_CONTROL_INTERFACE_VERSION:

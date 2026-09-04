@@ -17,6 +17,7 @@
 		A10000000000000000000009 /* BundledContent in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000010 /* BundledContent */; };
 		A10000000000000000000010 /* THIRD_PARTY_NOTICES.md in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000011 /* THIRD_PARTY_NOTICES.md */; };
 		A10000000000000000000011 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* LICENSE */; };
+		A10000000000000000000012 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000015 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +35,7 @@
 		B10000000000000000000012 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B10000000000000000000013 /* Win95iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Win95iOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B10000000000000000000014 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = LICENSE; sourceTree = SOURCE_ROOT; };
+		B10000000000000000000015 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -68,6 +70,7 @@
 				D10000000000000000000004 /* Display */,
 				D10000000000000000000005 /* Audio */,
 				D10000000000000000000007 /* Input */,
+				B10000000000000000000015 /* Assets.xcassets */,
 				B10000000000000000000010 /* BundledContent */,
 				B10000000000000000000012 /* Info.plist */,
 			);
@@ -148,7 +151,7 @@
 		F10000000000000000000002 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
-			files = (A10000000000000000000009 /* BundledContent in Resources */, A10000000000000000000010 /* THIRD_PARTY_NOTICES.md in Resources */, A10000000000000000000011 /* LICENSE in Resources */,);
+			files = (A10000000000000000000009 /* BundledContent in Resources */, A10000000000000000000010 /* THIRD_PARTY_NOTICES.md in Resources */, A10000000000000000000011 /* LICENSE in Resources */, A10000000000000000000012 /* Assets.xcassets in Resources */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
@@ -177,6 +180,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				APP_DISPLAY_NAME = "Windows 95";
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++17";
 				CLANG_ENABLE_OBJC_ARC = YES;
 				CLANG_ENABLE_MODULES = YES;
@@ -208,6 +212,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				APP_DISPLAY_NAME = "Windows 95";
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++17";
 				CLANG_ENABLE_OBJC_ARC = YES;
 				CLANG_ENABLE_MODULES = YES;

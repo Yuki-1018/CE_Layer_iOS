@@ -1,3 +1,4 @@
+import GameController
 import UIKit
 
 enum RetroKey {
@@ -52,29 +53,6 @@ enum RetroKey {
     static let printScreen: UInt32 = 316
     static let menu: UInt32 = 319
     static let power: UInt32 = 320
-
-    static func isModifier(_ key: UInt32) -> Bool {
-        switch key {
-        case leftShift, rightShift, leftControl, rightControl, leftAlt, rightAlt, leftSuper, rightSuper:
-            return true
-        default:
-            return false
-        }
-    }
-
-    static func orderedKeyCodes(from presses: Set<UIPress>, pressed: Bool) -> [UInt32] {
-        presses.compactMap { press in
-            guard let key = press.key else { return nil }
-            return fromHIDUsage(key.keyCode.rawValue)
-        }.sorted { left, right in
-            let leftIsModifier = isModifier(left)
-            let rightIsModifier = isModifier(right)
-            if leftIsModifier != rightIsModifier {
-                return pressed ? leftIsModifier : !leftIsModifier
-            }
-            return left < right
-        }
-    }
 
     static func fromHIDUsage(_ usage: Int) -> UInt32? {
         if (4...29).contains(usage) { return UInt32(usage - 4 + 97) }
@@ -139,6 +117,65 @@ enum RetroKey {
     }
 }
 
+final class PhysicalKeyboardInput {
+    private var keyboard: GCKeyboard?
+    private var observers: [NSObjectProtocol] = []
+    private var pressedKeys: Set<UInt32> = []
+    private let lock = NSLock()
+    private let sendKey: (UInt32, Bool) -> Void
+
+    init(sendKey: @escaping (UInt32, Bool) -> Void) {
+        self.sendKey = sendKey
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: .GCKeyboardDidConnect, object: nil, queue: .main) { [weak self] note in
+            guard let keyboard = note.object as? GCKeyboard else { return }
+            self?.attach(keyboard)
+        })
+        observers.append(center.addObserver(forName: .GCKeyboardDidDisconnect, object: nil, queue: .main) { [weak self] note in
+            guard let self, let keyboard = note.object as? GCKeyboard, keyboard === self.keyboard else { return }
+            self.detach()
+        })
+        if let keyboard = GCKeyboard.coalesced { attach(keyboard) }
+    }
+
+    deinit {
+        detach()
+        observers.forEach(NotificationCenter.default.removeObserver)
+    }
+
+    private func attach(_ keyboard: GCKeyboard) {
+        detach()
+        self.keyboard = keyboard
+        keyboard.keyboardInput?.keyChangedHandler = { [weak self] _, _, keyCode, pressed in
+            guard let self, let key = RetroKey.fromHIDUsage(keyCode.rawValue) else { return }
+            self.setKey(key, pressed: pressed)
+        }
+    }
+
+    private func detach() {
+        keyboard?.keyboardInput?.keyChangedHandler = nil
+        keyboard = nil
+        releaseAll()
+    }
+
+    private func setKey(_ key: UInt32, pressed: Bool) {
+        lock.lock()
+        let changed: Bool
+        if pressed { changed = pressedKeys.insert(key).inserted }
+        else { changed = pressedKeys.remove(key) != nil }
+        lock.unlock()
+        if changed { sendKey(key, pressed) }
+    }
+
+    func releaseAll() {
+        lock.lock()
+        let keys = pressedKeys
+        pressedKeys.removeAll()
+        lock.unlock()
+        keys.forEach { sendKey($0, false) }
+    }
+}
+
 final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
     var sendKey: ((UInt32, Bool) -> Void)? {
         didSet { accessory.sendKey = sendKey }
@@ -178,24 +215,6 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if !forwardPhysicalKeys(presses, pressed: true) { super.pressesBegan(presses, with: event) }
-    }
-
-    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if !forwardPhysicalKeys(presses, pressed: false) { super.pressesEnded(presses, with: event) }
-    }
-
-    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if !forwardPhysicalKeys(presses, pressed: false) { super.pressesCancelled(presses, with: event) }
-    }
-
-    private func forwardPhysicalKeys(_ presses: Set<UIPress>, pressed: Bool) -> Bool {
-        let keys = RetroKey.orderedKeyCodes(from: presses, pressed: pressed)
-        keys.forEach { sendKey?($0, pressed) }
-        return !keys.isEmpty
-    }
 
     func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
         if string.isEmpty {

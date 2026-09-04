@@ -39,10 +39,10 @@ index a2962b5..1d19fd1 100644
  {
  	if (sector_size > 512) return false; // unsupported here
 diff --git a/dosbox_pure_run.h b/dosbox_pure_run.h
-index a942090..f9b85db 100644
+index a942090..6bbbde4 100644
 --- a/dosbox_pure_run.h
 +++ b/dosbox_pure_run.h
-@@ -157,12 +157,32 @@ struct DBP_Run
+@@ -157,12 +157,31 @@ struct DBP_Run
  		{
  			DBP_Mount(0, false); // make sure something is mounted
  
@@ -73,14 +73,13 @@ index a942090..f9b85db 100644
 -			// If there is no mounted hard disk image but a D: drive, setup the CDROM IDE controller
 -			if (!imageDiskList['C'-'A'] && Drives['D'-'A'])
 -				IDE_SetupControllers(true);
-+			// Configure ATAPI before mounting the selected CD. Mounting here, on the
-+			// DOSBox boot thread, avoids unsafe live mutation of DOS/MSCDEX/IDE state.
++			// The selected CD was mounted by DOSBox Pure's normal auto-mount pass.
++			// Always expose the ATAPI controller to the booted operating system.
 +			IDE_SetupControllers(true);
-+			DBP_Win95MountInitialCD();
  
  			// Install the NE2000 network card
  			NET_SetupEthernet();
-@@ -638,7 +656,10 @@ struct DBP_Run
+@@ -638,7 +657,10 @@ struct DBP_Run
  
  		const char* cpath = (autostrlen ? NULL : strrchr(dbp_content_path.c_str(), '#'));
  		if (cpath && (dbp_content_path.c_str() + dbp_content_path.length() - cpath) <= DOS_PATHLENGTH)
@@ -93,7 +92,7 @@ index a942090..f9b85db 100644
  		for (char *p = buf, *pEnd = p + autostrlen, *line, line_no = 1; p != pEnd; line_no++)
  		{
 diff --git a/dosbox_pure_libretro.cpp b/dosbox_pure_libretro.cpp
-index ec99bf3..5d51733 100644
+index ec99bf3..41e0773 100644
 --- a/dosbox_pure_libretro.cpp
 +++ b/dosbox_pure_libretro.cpp
 @@ -39,6 +39,7 @@
@@ -138,18 +137,7 @@ index ec99bf3..5d51733 100644
  	"wait","waitmodechange","delay"
  };
  static std::vector<DBP_InputBind> dbp_input_binds;
-@@ -1257,1 +1260,10 @@ void DBPSerialize_Mounts(DBPArchive& ar)
-+static bool DBP_Win95MountInitialCD()
-+{
-+	if (dbp_win95_initial_cd_path.empty()) return true;
-+	const unsigned image_index = DBP_AppendImage(dbp_win95_initial_cd_path.c_str(), false);
-+	DBP_Mount(image_index, true, 'D');
-+	return dbp_images[image_index].mounted && dbp_images[image_index].drive == 'D' &&
-+		dynamic_cast<isoDrive*>(Drives['D'-'A']);
-+}
-+
- void DBPSerialize_Mounts(DBPArchive& ar)
-@@ -1302,6 +1314,7 @@ void DBP_OnBIOSReboot()
+@@ -1302,6 +1305,7 @@ void DBP_OnBIOSReboot()
  void DBP_OnBIOSPoweroff()
  {
  	// to be called on the DOSBox thread
@@ -157,7 +145,19 @@ index ec99bf3..5d51733 100644
  	dbp_biosreboot = true;
  	dbp_biospoweroff = true;
  	if (first_shell) DBP_DOSBOX_ForceShutdown();
-@@ -2908,7 +2921,9 @@ void retro_init(void) //#3
+@@ -2755,6 +2759,11 @@ static void init_dosbox(bool forcemenu = false, bool reinit = false, const std::
+ 	if (newcontent && !reinit)
+ 	{
+ 		init_dosbox_parse_drives();
++		// Register the frontend-selected CD before DOSBox Pure's normal
++		// auto-mount pass. This keeps ISO construction and MSCDEX setup in the
++		// native initialization sequence instead of mutating them during boot.
++		if (!dbp_win95_initial_cd_path.empty())
++			DBP_AppendImage(dbp_win95_initial_cd_path.c_str(), false);
+ 
+ 		if (!dbp_content_year && path)
+ 		{
+@@ -2908,7 +2917,9 @@ void retro_init(void) //#3
  		{RETROK_KP9, KBD_kp9}, {RETROK_KP0, KBD_kp0}, {RETROK_KP_DIVIDE, KBD_kpdivide},
  		{RETROK_KP_MULTIPLY, KBD_kpmultiply}, {RETROK_KP_MINUS, KBD_kpminus},
  		{RETROK_KP_PLUS, KBD_kpplus}, {RETROK_KP_ENTER, KBD_kpenter}, {RETROK_KP_PERIOD, KBD_kpperiod},
@@ -168,7 +168,7 @@ index ec99bf3..5d51733 100644
  	};
  	for (int i = 0; i != (sizeof(keymap)/sizeof(keymap[0])); i++)
  	{
-@@ -3067,6 +3082,7 @@ void retro_init(void) //#3
+@@ -3067,6 +3078,7 @@ void retro_init(void) //#3
  
  bool retro_load_game(const struct retro_game_info *info) //#4
  {
@@ -176,7 +176,7 @@ index ec99bf3..5d51733 100644
  	#ifndef DBP_STANDALONE
  	enum retro_pixel_format pixel_format = RETRO_PIXEL_FORMAT_XRGB8888;
  	if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &pixel_format))
-@@ -3377,6 +3393,38 @@ void retro_reset(void)
+@@ -3377,6 +3389,46 @@ void retro_reset(void)
  		input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)));
  }
  
@@ -198,6 +198,14 @@ index ec99bf3..5d51733 100644
 +extern "C" void dbp_win95_set_initial_cd(const char* path)
 +{
 +	dbp_win95_initial_cd_path.assign(path ? path : "");
++}
++
++extern "C" void dbp_win95_send_key(unsigned keycode, bool pressed)
++{
++	if (dbp_state == DBPSTATE_BOOT || dbp_state == DBPSTATE_SHUTDOWN || dbp_state == DBPSTATE_EXITED || keycode >= RETROK_LAST) return;
++	const int dosbox_key = dbp_keymap_retro2dos[keycode];
++	if (dosbox_key > KBD_NONE && dosbox_key < KBD_LAST)
++		KEYBOARD_AddKey((KBD_KEYS)dosbox_key, pressed);
 +}
 +
 +extern "C" void dbp_win95_release_input(void)

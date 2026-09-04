@@ -16,7 +16,7 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - アスペクト比を維持する全画面 Metal 表示（iPhone、iPad、AirPlay ミラーリング対応）
 - 画面内を移動できる折りたたみ式コンパクト操作メニュー
 - タッチトラックパッド、長押しドラッグ、2本指右クリック／スクロール
-- iOS ソフトウェアキーボード、USB/Bluetooth HID 物理キーボード、外部マウス／トラックパッド
+- iOS ソフトウェアキーボード、GameController HID 経由のUSB/Bluetooth物理キーボード、外部マウス／トラックパッド
 - UTM 型の特殊キーバー（Win/Ctrl/Alt/Shiftと文字・特殊キーの同時押し、Esc、Tab、矢印、F1〜F12、編集・ロックキー）
 - 複数 ISO/CUE/CHD の保存、専用一覧からの追加・mount・eject・削除（大容量イメージのストリーミング取込、安全な起動時mount）
 - 別アイコンで判別できる pause/resume、一時停止状態の自動保存・次回復帰、hardware reset
@@ -30,7 +30,7 @@ Windows 95 は Microsoft の著作物であり、このリポジトリには含�
 
 選択肢は2つです。
 
-1. アプリ起動後に `.img` または `.vhd` を Files picker から選ぶ（推奨）。イメージは Application Support の固定名へコピーされます。
+1. アプリ起動後に `.img` または `.vhd` を Files picker から選ぶ（推奨）。イメージは「このiPhone/iPad内」→アプリ名→`Win95` へコピーされます。
 2. 自分専用の private fork / local checkout で `Win95iOS/BundledContent/win95-base.img` を置いてからビルドする。`.gitignore` 対象なので、誤って公開しないよう注意してください。
 
 推奨 guest 設定:
@@ -50,7 +50,7 @@ scripts/validate_disk.sh path/to/win95-base.img
 
 ## GitHub Actions
 
-`Actions` → `Build unsigned IPA` → `Run workflow` を実行します。完了後、Artifact `Win95iOS-unsigned` から IPA を取得できます。
+`Actions` → `Build unsigned IPA` → `Run workflow` を実行します。実行画面ではホーム画面に表示するアプリ名、bundle ID、任意のカスタムアイコンURLを指定できます。アイコンは HTTPS で取得可能な1024×1024以上のPNG/JPEGを指定してください。空欄ならアイコンを追加せずにビルドします。完了後、Artifact `Win95iOS-unsigned` から IPA を取得できます。
 
 workflow は次を実行します。
 
@@ -94,7 +94,7 @@ base image (read only)
 iOS 側の主な保存先:
 
 ```text
-Application Support/Win95/
+Files > このiPhone/iPad内 > アプリ名 > Win95/
 ├── win95-base.img / .vhd       # Files picker から取り込んだ場合のみ
 ├── CDs/
 │   ├── install-disc-1.iso
@@ -104,6 +104,8 @@ Application Support/Win95/
 │   └── automatic-suspend.state # 一時停止中だけ保持する自動復帰状態
 └── System/
 ```
+
+このフォルダはファイルアプリから参照・編集できます。旧バージョンの `Application Support/Win95` は初回起動時にこの場所へ移動します。アプリ実行中にファイルを置換すると破損する可能性があるため、ベースイメージや保存データを編集するときはアプリを終了してください。
 
 通常の reset / power cycle でも overlay は維持されます。Windowsの書き込みはbackground移行時と正常終了時にも明示的にflushされます。
 

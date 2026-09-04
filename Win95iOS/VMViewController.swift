@@ -9,6 +9,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private let pauseOverlay = PauseOverlayView()
     private let toolbar = FloatingMenuView()
     private let keyboardCapture = KeyboardCaptureView()
+    private lazy var physicalKeyboard = PhysicalKeyboardInput { [weak self] key, pressed in
+        self?.bridge.sendKey(key, pressed: pressed)
+    }
     private var bridge: Win95CoreBridge!
     private var audio: AudioOutput!
     private var displayLink: CADisplayLink?
@@ -30,9 +33,13 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private enum ImportKind { case disk, cd }
 
     private lazy var supportDirectory: URL = {
-        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return root.appendingPathComponent("Win95", isDirectory: true)
     }()
+    private var legacySupportDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Win95", isDirectory: true)
+    }
     private var savesDirectory: URL { supportDirectory.appendingPathComponent("Saves", isDirectory: true) }
     private var systemDirectory: URL { supportDirectory.appendingPathComponent("System", isDirectory: true) }
     private var cdDirectory: URL { supportDirectory.appendingPathComponent("CDs", isDirectory: true) }
@@ -54,6 +61,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         bridge.statusHandler = { [weak self] status in self?.handleCoreStatus(status) }
         keyboardCapture.sendKey = { [weak self] key, pressed in self?.bridge.sendKey(key, pressed: pressed) }
         keyboardCapture.keyboardDidHide = { [weak self] in self?.becomeFirstResponder() }
+        _ = physicalKeyboard
         configureUI()
         startPhysicalMouseSupport()
         startDisplayLink()
@@ -65,6 +73,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     deinit {
+        physicalKeyboard.releaseAll()
         detachPhysicalMouse()
         displayLink?.invalidate()
         NotificationCenter.default.removeObserver(self)
@@ -86,6 +95,12 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     override var canBecomeFirstResponder: Bool { true }
 
     private func createDirectories() {
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: supportDirectory.path),
+           fileManager.fileExists(atPath: legacySupportDirectory.path) {
+            do { try fileManager.moveItem(at: legacySupportDirectory, to: supportDirectory) }
+            catch { NSLog("Could not migrate Windows 95 data into Documents: %@", error.localizedDescription) }
+        }
         try? FileManager.default.createDirectory(at: savesDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: cdDirectory, withIntermediateDirectories: true)
@@ -480,6 +495,12 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         isRestartingForCD = true
         refreshCDLibrary(busy: true)
         toolbar.showActivity(true)
+        if let CD {
+            UserDefaults.standard.set(CD.lastPathComponent, forKey: selectedCDKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: selectedCDKey)
+        }
+        UserDefaults.standard.synchronize()
         keyboardCapture.dismissKeyboard()
         audio.stop()
         manuallyPaused = false
@@ -490,11 +511,6 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         let relaunch = { [weak self] in
             guard let self else { return }
             afterStop?()
-            if let CD {
-                UserDefaults.standard.set(CD.lastPathComponent, forKey: self.selectedCDKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: self.selectedCDKey)
-            }
             self.toolbar.showActivity(false)
             self.startVM(disk: disk, CD: CD, restoreSuspendState: false)
         }
@@ -531,24 +547,6 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     @objc private func showKeyboard() {
         if keyboardCapture.isFirstResponder { keyboardCapture.dismissKeyboard() }
         else { keyboardCapture.becomeFirstResponder() }
-    }
-
-    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if !forwardPhysicalKeys(presses, pressed: true) { super.pressesBegan(presses, with: event) }
-    }
-
-    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if !forwardPhysicalKeys(presses, pressed: false) { super.pressesEnded(presses, with: event) }
-    }
-
-    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if !forwardPhysicalKeys(presses, pressed: false) { super.pressesCancelled(presses, with: event) }
-    }
-
-    private func forwardPhysicalKeys(_ presses: Set<UIPress>, pressed: Bool) -> Bool {
-        let keys = RetroKey.orderedKeyCodes(from: presses, pressed: pressed)
-        keys.forEach { bridge.sendKey($0, pressed: pressed) }
-        return !keys.isEmpty
     }
 
     @objc private func trackpadPan(_ recognizer: UIPanGestureRecognizer) {
@@ -686,6 +684,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     @objc private func appDidEnterBackground() {
         guard bridge.isRunning else { return }
         touchDragActive = false
+        physicalKeyboard.releaseAll()
         keyboardCapture.releaseModifiers()
         bridge.setLeftMouseButton(false)
         bridge.setRightMouseButton(false)
