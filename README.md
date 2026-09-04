@@ -7,7 +7,7 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 ## 実装済み
 
 - DOSBox Pure の x86 interpreter を固定コミットからビルド（JIT/dynarec 無効）
-- Pentium MMX 命令セット、128 MB、約 Pentium II 300 MHz 相当（実験設定）、S3 Trio64、SB16 の固定オプション
+- Pentium MMX 命令セット、128 MB、実機で60 fpsを維持しやすい77000 cycles、S3 Trio64、SB16 の固定オプション
 - raw `.img` / `.vhd` の BIOS 自動起動（DOSBox Pure のスタートメニューを表示しない）
 - 512-byte sector 単位の永続 differencing disk
 - base HDD は変更せず、変更 sector のみ `win95-base-CDRIVE.sav` に保存
@@ -115,7 +115,8 @@ Files > このiPhone/iPad内 > アプリ名 > Win95/
 - `≡` をドラッグ: メニューを画面内の任意位置へ移動
 - キーボードアイコン: ソフトウェアキーボードを表示／非表示
 - 特殊キーバーの Win/Ctrl/Alt/Shift: 選択後に文字または特殊キーを押すと同時押しとして送信
-- `CD`: CD-ROM 管理画面を開く。保存済みイメージのタップで mount、`CDを取り出す` で eject、左スワイプで削除。DOS/MSCDEX/IDE の稼働中書換えによるクラッシュを避けるため、変更時は Windows を安全に再起動します。
+- `CD`: CD-ROM 管理画面を開く。保存済みイメージのタップでライブmount、`CDを取り出す` で eject、左スワイプで削除。Windowsやアプリを終了せずにATAPIメディアを交換します。
+- 旧ビルドで保存されたCD選択や、マウント中に異常終了した状態を検出した場合は、起動ループを防ぐため一度だけCDなしで安全起動します。
 - `⏸` / `▶`: Windows の一時停止／再開（現在実行できる操作のアイコンを表示）。一時停止中にアプリを閉じた場合は、次回起動時に保存地点を復元して一時停止画面へ戻ります。
 - 1本指ドラッグ: マウスカーソル移動
 - タップ: 左クリック

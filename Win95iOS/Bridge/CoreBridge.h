@@ -25,13 +25,14 @@ typedef void (^Win95Completion)(NSError * _Nullable error);
 - (instancetype)init NS_UNAVAILABLE;
 
 - (void)startWithDiskURL:(NSURL *)diskURL
-                   CDURL:(NSURL * _Nullable)CDURL
-              completion:(Win95Completion)completion NS_SWIFT_NAME(start(diskURL:cdURL:completion:));
+              completion:(Win95Completion)completion NS_SWIFT_NAME(start(diskURL:completion:));
 - (void)stopWithCompletion:(dispatch_block_t _Nullable)completion;
 - (void)setEmulationPaused:(BOOL)paused;
 - (void)reset;
 - (void)flushDisk;
 - (void)flushDiskWithCompletion:(Win95Completion)completion NS_SWIFT_NAME(flushDisk(completion:));
+- (void)mountCDAtURL:(NSURL *)url completion:(Win95Completion)completion NS_SWIFT_NAME(mountCD(at:completion:));
+- (void)ejectCDWithCompletion:(Win95Completion)completion NS_SWIFT_NAME(ejectCD(completion:));
 
 - (void)saveSuspendStateToURL:(NSURL *)url completion:(Win95Completion)completion NS_SWIFT_NAME(saveSuspendState(to:completion:));
 - (void)loadSuspendStateFromURL:(NSURL *)url completion:(Win95Completion)completion NS_SWIFT_NAME(loadSuspendState(from:completion:));

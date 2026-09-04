@@ -26,7 +26,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var manuallyPaused = false
     private var resumeAfterForeground = false
     private var pauseGeneration = 0
-    private var isRestartingForCD = false
+    private var isChangingCD = false
     private weak var pauseButton: UIButton?
     private weak var cdLibraryController: CDLibraryViewController?
 
@@ -45,6 +45,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var cdDirectory: URL { supportDirectory.appendingPathComponent("CDs", isDirectory: true) }
     private var suspendStateURL: URL { savesDirectory.appendingPathComponent("automatic-suspend.state") }
     private let selectedCDKey = "SelectedCDImageName"
+    private let cdMountInProgressKey = "CDMountInProgress"
+    private let cdMountStateVersionKey = "CDMountStateVersion"
+    private var recoveredFromInterruptedCDMount = false
     private var importedDiskURL: URL? {
         for ext in ["img", "vhd"] {
             let url = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(ext)
@@ -191,6 +194,11 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     private func startDisplayLink() {
         let link = CADisplayLink(target: self, selector: #selector(refreshDisplay))
+        if #available(iOS 15.0, *) {
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+        } else {
+            link.preferredFramesPerSecond = 60
+        }
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
@@ -203,14 +211,27 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     private func startBundledOrImportedDisk() {
-        let initialCD = persistedCDURL
+        let initialCD = recoverablePersistedCDURL
         if let importedDiskURL { startVM(disk: importedDiskURL, CD: initialCD); return }
         if let bundled = Bundle.main.url(forResource: "win95-base", withExtension: "img", subdirectory: "BundledContent") { startVM(disk: bundled, CD: initialCD); return }
         showMissingDisk()
     }
 
-    private var persistedCDURL: URL? {
-        guard let name = UserDefaults.standard.string(forKey: selectedCDKey),
+    private var recoverablePersistedCDURL: URL? {
+        let defaults = UserDefaults.standard
+        let hasLegacyUnsafeSelection = defaults.string(forKey: selectedCDKey) != nil &&
+            defaults.integer(forKey: cdMountStateVersionKey) < 2
+        if defaults.bool(forKey: cdMountInProgressKey) || hasLegacyUnsafeSelection {
+            defaults.removeObject(forKey: cdMountInProgressKey)
+            defaults.removeObject(forKey: selectedCDKey)
+            defaults.set(2, forKey: cdMountStateVersionKey)
+            defaults.synchronize()
+            try? FileManager.default.removeItem(at: suspendStateURL)
+            try? FileManager.default.removeItem(at: suspendStateURL.appendingPathExtension("partial"))
+            recoveredFromInterruptedCDMount = true
+            return nil
+        }
+        guard let name = defaults.string(forKey: selectedCDKey),
               !name.contains("/"), !name.contains("\\") else { return nil }
         let url = cdDirectory.appendingPathComponent(name)
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
@@ -218,10 +239,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     private func startVM(disk: URL, CD: URL?, restoreSuspendState: Bool = true) {
         activeDiskURL = disk
-        activeCDURL = CD
-        bridge.start(diskURL: disk, cdURL: CD) { [weak self] error in
+        activeCDURL = nil
+        bridge.start(diskURL: disk) { [weak self] error in
             guard let self else { return }
-            self.isRestartingForCD = false
             self.toolbar.showActivity(false)
             self.refreshCDLibrary(busy: false)
             if let error { self.showError(error); return }
@@ -229,6 +249,15 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 self.restoreAutomaticSuspendState()
             } else {
                 self.startAudioIfNeeded()
+            }
+            if let CD { self.changeCD(to: CD, automatic: true) }
+            else if self.recoveredFromInterruptedCDMount {
+                self.recoveredFromInterruptedCDMount = false
+                self.showError(NSError(
+                    domain: "Win95UI",
+                    code: 7,
+                    userInfo: [NSLocalizedDescriptionKey: "以前のCDマウント状態を安全に復旧するため、CDを取り出した状態で起動しました。CDイメージを確認してから再度マウントしてください。"]
+                ))
             }
         }
     }
@@ -483,39 +512,48 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             do { try validateISO(at: url) }
             catch { showError(error); return }
         }
-        restartVM(with: url)
+        changeCD(to: url)
     }
 
     private func ejectCD() {
-        restartVM(with: nil)
+        changeCD(to: nil)
     }
 
-    private func restartVM(with CD: URL?, afterStop: (() -> Void)? = nil) {
-        guard !isRestartingForCD, let disk = activeDiskURL else { return }
-        isRestartingForCD = true
+    private func changeCD(to CD: URL?, automatic: Bool = false, afterChange: (() -> Void)? = nil) {
+        guard !isChangingCD, bridge.isRunning else { return }
+        isChangingCD = true
         refreshCDLibrary(busy: true)
         toolbar.showActivity(true)
-        if let CD {
-            UserDefaults.standard.set(CD.lastPathComponent, forKey: selectedCDKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: selectedCDKey)
-        }
-        UserDefaults.standard.synchronize()
-        keyboardCapture.dismissKeyboard()
-        audio.stop()
-        manuallyPaused = false
-        resumeAfterForeground = false
-        discardAutomaticSuspendState()
-        updatePausedAppearance(saving: false)
+        let defaults = UserDefaults.standard
+        defaults.set(true, forKey: cdMountInProgressKey)
+        defaults.synchronize()
 
-        let relaunch = { [weak self] in
+        let completion: (Error?) -> Void = { [weak self] error in
             guard let self else { return }
-            afterStop?()
+            defaults.removeObject(forKey: self.cdMountInProgressKey)
+            defaults.synchronize()
+            self.isChangingCD = false
             self.toolbar.showActivity(false)
-            self.startVM(disk: disk, CD: CD, restoreSuspendState: false)
+            if let error {
+                if automatic {
+                    defaults.removeObject(forKey: self.selectedCDKey)
+                    defaults.synchronize()
+                }
+                self.showError(error)
+            } else {
+                self.activeCDURL = CD
+                if let CD {
+                    defaults.set(CD.lastPathComponent, forKey: self.selectedCDKey)
+                    defaults.set(2, forKey: self.cdMountStateVersionKey)
+                }
+                else { defaults.removeObject(forKey: self.selectedCDKey) }
+                defaults.synchronize()
+                afterChange?()
+            }
+            self.refreshCDLibrary(busy: false)
         }
-        if bridge.isRunning { bridge.stop(completion: relaunch) }
-        else { relaunch() }
+        if let CD { bridge.mountCD(at: CD, completion: completion) }
+        else { bridge.ejectCD(completion: completion) }
     }
 
     private func confirmDeleteCD(_ url: URL) {
@@ -541,7 +579,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             self.refreshCDLibrary(busy: false)
         }
         guard activeCDURL == url else { removeFile(); return }
-        restartVM(with: nil, afterStop: removeFile)
+        changeCD(to: nil, afterChange: removeFile)
     }
 
     @objc private func showKeyboard() {
@@ -611,7 +649,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     @objc private func togglePause() {
-        guard bridge.isRunning, !isRestartingForCD else { return }
+        guard bridge.isRunning, !isChangingCD else { return }
         if bridge.isPaused {
             manuallyPaused = false
             resumeAfterForeground = false
@@ -915,7 +953,7 @@ private final class CDLibraryViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         guard section == 1 else { return nil }
-        return "安全のため、CDの挿入・交換・取り出し時はWindowsを再起動します。左へスワイプすると削除できます。"
+        return "Windowsを動かしたままCDを挿入・交換・取り出しできます。左へスワイプすると削除できます。"
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {

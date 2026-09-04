@@ -12,9 +12,13 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
         super.init(frame: .zero, device: device)
         colorPixelFormat = .bgra8Unorm
         framebufferOnly = true
-        enableSetNeedsDisplay = false
-        isPaused = false
+        // The controller's 60 Hz CADisplayLink supplies new emulator frames.
+        // Render only when a new texture arrives instead of running a second,
+        // competing MTKView timer that iOS may coalesce down to 30 Hz.
+        enableSetNeedsDisplay = true
+        isPaused = true
         preferredFramesPerSecond = 60
+        presentsWithTransaction = false
         clearColor = MTLClearColorMake(0.02, 0.02, 0.02, 1)
         commandQueue = device.makeCommandQueue()
 
@@ -53,6 +57,7 @@ final class MetalDisplayView: MTKView, MTKViewDelegate {
         }
         contentAspectRatio = frame.aspectRatio > 0 ? CGFloat(frame.aspectRatio) : CGFloat(frame.width) / CGFloat(frame.height)
         textureLock.unlock()
+        setNeedsDisplay()
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
