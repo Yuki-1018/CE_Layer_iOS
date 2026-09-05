@@ -1,98 +1,5 @@
-diff --git a/include/bios_disk.h b/include/bios_disk.h
-index 259dbe0..cf8ef6a 100644
---- a/include/bios_disk.h
-+++ b/include/bios_disk.h
-@@ -62,6 +62,7 @@ public:
- 	~imageDisk();
- 	Bit32u Read_Raw(Bit8u *buffer, Bit32u seek, Bit32u len);
- 	void SetDifferencingDisk(const char* savePath);
-+	void FlushDifferencingDisk();
- 	bool ExportToFile(const char* path, bool vhd_format);
- 	#else
- 	imageDisk(FILE *imgFile, const char *imgName, Bit32u imgSizeK, bool isHardDisk);
-diff --git a/src/ints/bios_disk.cpp b/src/ints/bios_disk.cpp
-index a2962b5..1d19fd1 100644
---- a/src/ints/bios_disk.cpp
-+++ b/src/ints/bios_disk.cpp
-@@ -34,6 +34,7 @@
- #ifdef C_DBP_SUPPORT_DISK_MOUNT_DOSFILE
- #include <time.h>
- #include <stdlib.h>
-+#include <unistd.h>
- 
- struct discardDisk
- {
-@@ -1338,6 +1339,15 @@ void imageDisk::SetDifferencingDisk(const char* savePath)
- 	differencing->SetupSave(savePath, heads*cylinders*sectors);
- }
- 
-+void imageDisk::FlushDifferencingDisk()
-+{
-+	if (differencing && differencing->saveFile)
-+	{
-+		fflush(differencing->saveFile);
-+		fsync(fileno(differencing->saveFile));
-+	}
-+}
-+
- bool imageDisk::ExportToFile(const char* path, bool vhd_format)
- {
- 	if (sector_size > 512) return false; // unsupported here
-diff --git a/dosbox_pure_run.h b/dosbox_pure_run.h
-index a942090..9cbe937 100644
---- a/dosbox_pure_run.h
-+++ b/dosbox_pure_run.h
-@@ -157,12 +157,31 @@ struct DBP_Run
- 		{
- 			DBP_Mount(0, false); // make sure something is mounted
- 
--			// If hard disk image was mounted to D:, swap it to be the bootable C: drive
--			std::swap(imageDiskList['D'-'A'], imageDiskList['C'-'A']);
-+			// If hard disk image was mounted to D:/E:, move it to the bootable C: drive.
-+			// The FAT drive owns the same imageDisk pointer, so detach it before freeing
-+			// the temporary DOS drive. Otherwise mounting an ISO at D: frees the C: disk.
-+			char fixed_disk_drive = 0;
-+			if (imageDiskList['D'-'A']) fixed_disk_drive = 'D';
-+			else if (imageDiskList['E'-'A']) fixed_disk_drive = 'E';
-+			if (fixed_disk_drive)
-+			{
-+				DBP_Image* fixed_disk_image = NULL;
-+				for (DBP_Image& image : dbp_images)
-+					if (image.mounted && image.drive == fixed_disk_drive) { fixed_disk_image = &image; break; }
-+				std::swap(imageDiskList[fixed_disk_drive-'A'], imageDiskList['C'-'A']);
-+				if (fatDrive* mounted = dynamic_cast<fatDrive*>(Drives[fixed_disk_drive-'A']))
-+					if (mounted->loadedDisk == imageDiskList['C'-'A']) mounted->loadedDisk = NULL;
-+				DBP_Unmount(fixed_disk_drive);
-+				if (fixed_disk_image) { fixed_disk_image->mounted = true; fixed_disk_image->drive = 'C'; }
-+			}
-+
-+			// The iOS fixed machine keeps its bundled/imported base image immutable.
-+			if (imageDiskList['C'-'A'])
-+				imageDiskList['C'-'A']->SetDifferencingDisk(DBP_GetSaveFile(SFT_DIFFDISK).c_str());
- 
--			// If there is no mounted hard disk image but a D: drive, setup the CDROM IDE controller
--			if (!imageDiskList['C'-'A'] && Drives['D'-'A'])
--				IDE_SetupControllers(true);
-+			// Keep an empty ATAPI drive available so the frontend can safely insert
-+			// and eject media through libretro's runtime disk-control interface.
-+			IDE_SetupControllers(true);
- 
- 			// Install the NE2000 network card
- 			NET_SetupEthernet();
-@@ -638,7 +657,10 @@ struct DBP_Run
- 
- 		const char* cpath = (autostrlen ? NULL : strrchr(dbp_content_path.c_str(), '#'));
- 		if (cpath && (dbp_content_path.c_str() + dbp_content_path.length() - cpath) <= DOS_PATHLENGTH)
--			autostrlen = (Bit16u)sprintf(buf, "%s%s", (cpath[1] && cpath[2] == ':' ? "" : "C:\\"), cpath + 1);
-+		{
-+			const bool is_directive = (cpath[1] && cpath[2] == '*');
-+			autostrlen = (Bit16u)sprintf(buf, "%s%s", (is_directive || (cpath[1] && cpath[2] == ':') ? "" : "C:\\"), cpath + 1);
-+		}
- 
- 		for (char *p = buf, *pEnd = p + autostrlen, *line, line_no = 1; p != pEnd; line_no++)
- 		{
 diff --git a/dosbox_pure_libretro.cpp b/dosbox_pure_libretro.cpp
-index ec99bf3..e386ada 100644
+index ec99bf3..47159a3 100644
 --- a/dosbox_pure_libretro.cpp
 +++ b/dosbox_pure_libretro.cpp
 @@ -39,6 +39,7 @@
@@ -129,7 +36,15 @@ index ec99bf3..e386ada 100644
  	"wait","waitmodechange","delay"
  };
  static std::vector<DBP_InputBind> dbp_input_binds;
-@@ -1302,6 +1304,7 @@ void DBP_OnBIOSReboot()
+@@ -320,6 +322,7 @@ int MSCDEX_AddDrive(char driveLetter, const char* physicalPath, Bit8u& subUnit);
+ int MSCDEX_RemoveDrive(char driveLetter);
+ void IDE_RefreshCDROMs();
+ void IDE_SetupControllers(bool alwaysHaveCDROM);
++void IDE_Win95ForgetCD();
+ void NET_SetupEthernet();
+ bool MIDI_TSF_SwitchSF(const char*);
+ const char* DBP_MIDI_StartupError(Section* midisec, const char*& arg);
+@@ -1302,6 +1305,7 @@ void DBP_OnBIOSReboot()
  void DBP_OnBIOSPoweroff()
  {
  	// to be called on the DOSBox thread
@@ -137,7 +52,7 @@ index ec99bf3..e386ada 100644
  	dbp_biosreboot = true;
  	dbp_biospoweroff = true;
  	if (first_shell) DBP_DOSBOX_ForceShutdown();
-@@ -2908,7 +2911,9 @@ void retro_init(void) //#3
+@@ -2908,7 +2912,9 @@ void retro_init(void) //#3
  		{RETROK_KP9, KBD_kp9}, {RETROK_KP0, KBD_kp0}, {RETROK_KP_DIVIDE, KBD_kpdivide},
  		{RETROK_KP_MULTIPLY, KBD_kpmultiply}, {RETROK_KP_MINUS, KBD_kpminus},
  		{RETROK_KP_PLUS, KBD_kpplus}, {RETROK_KP_ENTER, KBD_kpenter}, {RETROK_KP_PERIOD, KBD_kpperiod},
@@ -148,7 +63,7 @@ index ec99bf3..e386ada 100644
  	};
  	for (int i = 0; i != (sizeof(keymap)/sizeof(keymap[0])); i++)
  	{
-@@ -2966,7 +2971,9 @@ void retro_init(void) //#3
+@@ -2966,7 +2972,9 @@ void retro_init(void) //#3
  		static bool RETRO_CALLCONV set_image_index(unsigned index)
  		{
  			if (index >= dbp_images.size()) return false;
@@ -158,7 +73,7 @@ index ec99bf3..e386ada 100644
  			return true;
  		}
  
-@@ -2978,6 +2985,7 @@ void retro_init(void) //#3
+@@ -2978,6 +2986,7 @@ void retro_init(void) //#3
  		static bool RETRO_CALLCONV replace_image_index(unsigned index, const struct retro_game_info *info)
  		{
  			if (index >= dbp_images.size()) return false;
@@ -166,7 +81,7 @@ index ec99bf3..e386ada 100644
  			if (dbp_images[dbp_image_index].mounted)
  				DBP_Unmount(dbp_images[dbp_image_index].drive);
  			if (info == NULL)
-@@ -2994,14 +3002,17 @@ void retro_init(void) //#3
+@@ -2994,14 +3003,17 @@ void retro_init(void) //#3
  				dbp_images[index].dirlen = (int)((lastSlash && lastSlash > lastBackSlash ? lastSlash + 1 : (lastBackSlash ? lastBackSlash + 1 : info->path)) - info->path);
  				dbp_images[index].dd = 0;
  			}
@@ -184,18 +99,41 @@ index ec99bf3..e386ada 100644
  			return true;
  		}
  
-@@ -3067,6 +3078,7 @@ void retro_init(void) //#3
+@@ -3067,6 +3079,8 @@ void retro_init(void) //#3
  
  bool retro_load_game(const struct retro_game_info *info) //#4
  {
 +	dbp_win95_poweroff_requested.store(false);
++	IDE_Win95ForgetCD();
  	#ifndef DBP_STANDALONE
  	enum retro_pixel_format pixel_format = RETRO_PIXEL_FORMAT_XRGB8888;
  	if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &pixel_format))
-@@ -3377,6 +3389,41 @@ void retro_reset(void)
+@@ -3377,6 +3391,63 @@ void retro_reset(void)
  		input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)));
  }
  
++int IDE_Win95ChangeCD(const char*);
++bool IDE_Win95Ready();
++
++extern "C" int dbp_win95_change_cd(const char* path)
++{
++	if (dbp_state == DBPSTATE_BOOT) return 2;
++	if (dbp_state == DBPSTATE_SHUTDOWN || dbp_state == DBPSTATE_EXITED) return 0;
++	DBP_ThreadControl(TCM_PAUSE_FRAME);
++	const int result = IDE_Win95ChangeCD(path);
++	DBP_ThreadControl(TCM_RESUME_FRAME);
++	return result;
++}
++
++extern "C" bool dbp_win95_disk_ready(void)
++{
++	if (dbp_state == DBPSTATE_BOOT || dbp_state == DBPSTATE_SHUTDOWN || dbp_state == DBPSTATE_EXITED) return false;
++	DBP_ThreadControl(TCM_PAUSE_FRAME);
++	const bool ready = imageDiskList['C'-'A'] && IDE_Win95Ready();
++	DBP_ThreadControl(TCM_RESUME_FRAME);
++	return ready;
++}
++
 +extern "C" void dbp_win95_flush_disk(void)
 +{
 +	if (dbp_state == DBPSTATE_BOOT || dbp_state == DBPSTATE_SHUTDOWN) return;
@@ -234,6 +172,80 @@ index ec99bf3..e386ada 100644
  void retro_run_touchpad(bool has_press, Bit16s absx, Bit16s absy)
  {
  	static Bit8u last_presses, down_btn, is_move, is_tap;
+diff --git a/dosbox_pure_run.h b/dosbox_pure_run.h
+index a942090..f522d2f 100644
+--- a/dosbox_pure_run.h
++++ b/dosbox_pure_run.h
+@@ -152,21 +152,35 @@ struct DBP_Run
+ 
+ 	static void BootImage()
+ 	{
+-		DBP_ASSERT(!dbp_images.empty()); // IT_BOOTIMG should only be available if this is true
++		DBP_ASSERT(!dbp_images.empty() || imageDiskList['C'-'A']);
+ 		if (!dbp_images.empty())
+ 		{
+ 			DBP_Mount(0, false); // make sure something is mounted
+ 
+-			// If hard disk image was mounted to D:, swap it to be the bootable C: drive
+-			std::swap(imageDiskList['D'-'A'], imageDiskList['C'-'A']);
+-
+-			// If there is no mounted hard disk image but a D: drive, setup the CDROM IDE controller
+-			if (!imageDiskList['C'-'A'] && Drives['D'-'A'])
+-				IDE_SetupControllers(true);
+-
+-			// Install the NE2000 network card
+-			NET_SetupEthernet();
++			// If hard disk image was mounted to D:/E:, move it to the bootable C: drive.
++			// The FAT drive owns the same imageDisk pointer, so detach it before freeing
++			// the temporary DOS drive. Otherwise mounting an ISO at D: frees the C: disk.
++			char fixed_disk_drive = 0;
++			if (imageDiskList['D'-'A']) fixed_disk_drive = 'D';
++			else if (imageDiskList['E'-'A']) fixed_disk_drive = 'E';
++			if (fixed_disk_drive)
++			{
++				DBP_Image* fixed_disk_image = NULL;
++				for (DBP_Image& image : dbp_images)
++					if (image.mounted && image.drive == fixed_disk_drive) { fixed_disk_image = &image; break; }
++				std::swap(imageDiskList[fixed_disk_drive-'A'], imageDiskList['C'-'A']);
++				if (fatDrive* mounted = dynamic_cast<fatDrive*>(Drives[fixed_disk_drive-'A']))
++					if (mounted->loadedDisk == imageDiskList['C'-'A']) mounted->loadedDisk = NULL;
++				DBP_Unmount(fixed_disk_drive);
++				if (fixed_disk_image) { fixed_disk_image->mounted = true; fixed_disk_image->drive = 'C'; }
++			}
+ 		}
++		// FAT16 content can be mounted directly as C: without a dbp_images entry.
++		// Always install its overlay and ATAPI controller, including that path.
++		if (imageDiskList['C'-'A'])
++			imageDiskList['C'-'A']->SetDifferencingDisk(DBP_GetSaveFile(SFT_DIFFDISK).c_str());
++		IDE_SetupControllers(true);
++		NET_SetupEthernet();
+ 
+ 		RunBatchFile(new BatchFileBoot(imageDiskList['A'-'A'] ? 'A' : 'C'));
+ 	}
+@@ -638,7 +652,10 @@ struct DBP_Run
+ 
+ 		const char* cpath = (autostrlen ? NULL : strrchr(dbp_content_path.c_str(), '#'));
+ 		if (cpath && (dbp_content_path.c_str() + dbp_content_path.length() - cpath) <= DOS_PATHLENGTH)
+-			autostrlen = (Bit16u)sprintf(buf, "%s%s", (cpath[1] && cpath[2] == ':' ? "" : "C:\\"), cpath + 1);
++		{
++			const bool is_directive = (cpath[1] && cpath[2] == '*');
++			autostrlen = (Bit16u)sprintf(buf, "%s%s", (is_directive || (cpath[1] && cpath[2] == ':') ? "" : "C:\\"), cpath + 1);
++		}
+ 
+ 		for (char *p = buf, *pEnd = p + autostrlen, *line, line_no = 1; p != pEnd; line_no++)
+ 		{
+diff --git a/include/bios_disk.h b/include/bios_disk.h
+index ff8c84b..4f76165 100644
+--- a/include/bios_disk.h
++++ b/include/bios_disk.h
+@@ -65,6 +65,7 @@ public:
+ 	~imageDisk();
+ 	Bit32u Read_Raw(Bit8u *buffer, Bit32u seek, Bit32u len);
+ 	void SetDifferencingDisk(const char* savePath);
++	void FlushDifferencingDisk();
+ 	bool ExportToFile(const char* path, bool vhd_format);
+ 	#else
+ 	imageDisk(FILE *imgFile, const char *imgName, Bit32u imgSizeK, bool isHardDisk);
 diff --git a/include/keyboard.h b/include/keyboard.h
 index 8d8bf0b..d965b11 100644
 --- a/include/keyboard.h
@@ -246,6 +258,164 @@ index 8d8bf0b..d965b11 100644
  
  	
  	KBD_LAST
+diff --git a/src/dos/cdrom_image.cpp b/src/dos/cdrom_image.cpp
+index 047d19d..870376f 100644
+--- a/src/dos/cdrom_image.cpp
++++ b/src/dos/cdrom_image.cpp
+@@ -347,17 +347,14 @@ void CDROM_Interface_Image::InitNewMedia()
+ 
+ bool CDROM_Interface_Image::SetDevice(char* path, int /*forceCD*/)
+ {
+-	if (LoadCueSheet(path)) return true;
+ 	if (LoadIsoFile(path)) return true;
++	if (LoadCueSheet(path)) return true;
+ #ifdef C_DBP_SUPPORT_CDROM_CHD_IMAGE
+ 	if (LoadChdFile(path)) return true;
+ #endif
+ 	
+-	// print error message on dosbox console
+-	char buf[MAX_LINE_LENGTH];
+-	snprintf(buf, MAX_LINE_LENGTH, "Could not load image file: %s\r\n", path);
+-	Bit16u size = (Bit16u)strlen(buf);
+-	DOS_WriteFile(STDOUT, (Bit8u*)buf, &size);
++	// A booted OS owns guest memory; reporting a host error must not invoke DOS.
++	LOG_MSG("Could not load image file: %s", path);
+ 	return false;
+ }
+ 
+@@ -808,7 +805,8 @@ bool CDROM_Interface_Image::LoadCueSheet(char *cuefile)
+ 	bool canAddTrack = false;
+ #ifdef C_DBP_SUPPORT_CDROM_MOUNT_DOSFILE
+ 	std::string dosfilebuf;
+-	if (!ReadAndClose(FindAndOpenDosFile(cuefile), dosfilebuf)) return false;
++	// The CUE probe must never read a binary CD image wholesale into RAM.
++	if (!ReadAndClose(FindAndOpenDosFile(cuefile), dosfilebuf, 1024 * 1024)) return false;
+ 	istringstream inString(dosfilebuf);
+ 	istream& in = (istream&)inString;
+ #else
+@@ -1303,6 +1301,7 @@ void DBPSerialize_CDPlayer(DBPArchive& ar_outer)
+ 		for (int i = 2; i != 10; i++)
+ 			if ((img = (Drives[i] && dynamic_cast<isoDrive*>(Drives[i]) ? dynamic_cast<CDROM_Interface_Image*>(((isoDrive*)Drives[i])->GetInterface()) : NULL)) != NULL)
+ 				break;
++		if (!img) img = CDROM_Interface_Image::images[25]; // frontend-owned ATAPI media
+ 		CDROM_Interface_Image::player.cd = img;
+ 		if (!img) CDROM_Interface_Image::player.isPlaying = false;
+ 	}
+diff --git a/src/dos/drives.cpp b/src/dos/drives.cpp
+index 95cf8f3..0e5f6c3 100644
+--- a/src/dos/drives.cpp
++++ b/src/dos/drives.cpp
+@@ -457,7 +457,7 @@ Bit32u DBP_Make8dot3FileName(char* target, Bit32u target_len, const char* source
+ DOS_File *FindAndOpenDosFile(char const* filename, Bit32u *bsize, bool* writable, char const* relative_to, std::string* out_resolve_path)
+ {
+ 	if (!filename || !*filename) return NULL;
+-	if (relative_to && *relative_to)
++	if (relative_to && *relative_to && filename[0] != '/')
+ 	{
+ 		const char *lastfs = strrchr(relative_to, '/'), *lastbs = strrchr(relative_to, '\\');
+ 		const char *delim = (lastfs > lastbs ? lastfs : lastbs);
+@@ -467,7 +467,7 @@ DOS_File *FindAndOpenDosFile(char const* filename, Bit32u *bsize, bool* writable
+ 			std::string merge;
+ 			merge.append(relative_to, delim + 1 - relative_to).append(filename);
+ 			DOS_File *merge_file = FindAndOpenDosFile(merge.c_str(), bsize, writable);
+-			if (merge_file) return merge_file;
++			if (merge_file || relative_to[0] == '/') return merge_file;
+ 		}
+ 	}
+ 
+@@ -478,7 +478,10 @@ DOS_File *FindAndOpenDosFile(char const* filename, Bit32u *bsize, bool* writable
+ 	std::string filename_s;
+ 	char dos_path[DOS_PATHLENGTH + 2];
+ 	const char *drv_path = NULL;
+-	const Bit8u drive = (filename[1] == ':' ? ((filename[0]|0x20)-'a') : (control ? DOS_GetDefaultDrive() : DOS_DRIVES));
++	// Absolute native paths must not query DOS SDA/DTA or search guest drives.
++	// Windows owns that memory after boot and may have paging enabled.
++	const Bit8u drive = (!force_mounted && filename[0] == '/' ? DOS_DRIVES :
++		(filename[1] == ':' ? ((filename[0]|0x20)-'a') : (control ? DOS_GetDefaultDrive() : DOS_DRIVES)));
+ 	DOS_Drive* drv = (drive < DOS_DRIVES ? Drives[drive] : NULL);
+ 	if (drv)
+ 	{
+diff --git a/src/hardware/ide.cpp b/src/hardware/ide.cpp
+index 4618145..78a81e7 100644
+--- a/src/hardware/ide.cpp
++++ b/src/hardware/ide.cpp
+@@ -2923,6 +2923,13 @@ static void ide_baseio_w(Bitu port,Bitu val,Bitu iolen) {
+ 	}
+ }
+ 
++// Owned by the fixed-machine frontend, independently of DOS/MSCDEX drives.
++static CDROM_Interface_Image* win95_cdrom = NULL;
++static bool win95_cdrom_controlled = false;
++static std::string win95_cdrom_path;
++int IDE_Win95ChangeCD(const char* path);
++void IDE_Win95ForgetCD() { win95_cdrom_path.clear(); }
++
+ void IDE_RefreshCDROMs()
+ {
+ 	if (!idecontroller[0]) return; // IDE_SetupControllers not yet called
+@@ -2935,7 +2942,9 @@ void IDE_RefreshCDROMs()
+ 		if (!d || d->type != IDE_TYPE_CDROM) continue;
+ 
+ 		CDROM_Interface* cdrom;
+-		if (d->DOSDriveIndex >= dosDriveIndex)
++		if (win95_cdrom_controlled)
++			cdrom = win95_cdrom;
++		else if (d->DOSDriveIndex >= dosDriveIndex)
+ 		{
+ 			DOS_Drive* drive = Drives[(dosDriveIndex = d->DOSDriveIndex)++];
+ 			cdrom = (drive && dynamic_cast<isoDrive*>(drive) ? ((isoDrive*)drive)->GetInterface() : NULL);
+@@ -2994,12 +3003,51 @@ void IDE_SetupControllers(bool alwaysHaveCDROM)
+ 	}
+ 
+ 	IDE_RefreshCDROMs();
++	if (!win95_cdrom_path.empty()) IDE_Win95ChangeCD(win95_cdrom_path.c_str());
++}
++
++// Called with the emulation thread parked. Do not construct an isoDrive here:
++// MSCDEX and DOS media-table writes are not safe in a booted protected-mode OS.
++bool IDE_Win95Ready() { return idecontroller[0] != NULL; }
++
++int IDE_Win95ChangeCD(const char* path)
++{
++	if (!idecontroller[0]) return 2; // frontend retries after the boot frame
++
++	CDROM_Interface_Image* replacement = NULL;
++	const Bit8u slot = 25; // outside the DOS CD units used by this fixed machine
++	if (path && *path)
++	{
++		replacement = new CDROM_Interface_Image(slot);
++		std::vector<char> filename(path, path + strlen(path) + 1);
++		if (!replacement->SetDevice(filename.data(), 0))
++		{
++			delete replacement;
++			CDROM_Interface_Image::images[slot] = win95_cdrom;
++			return 0;
++		}
++	}
++
++	CDROM_Interface_Image* old = win95_cdrom;
++	win95_cdrom_controlled = true;
++	win95_cdrom = NULL;
++	IDE_RefreshCDROMs(); // detach first, including on disc-to-disc replacement
++	delete old;
++	win95_cdrom = replacement;
++	CDROM_Interface_Image::images[slot] = replacement;
++	IDE_RefreshCDROMs();
++	win95_cdrom_path = (path ? path : "");
++	return 1;
+ }
+ 
+ void IDE_ShutdownControllers(void)
+ {
+ 	for (IDEController*& c : idecontroller)
+ 		if (c) { delete c; c = NULL; }
++	delete win95_cdrom;
++	win95_cdrom = NULL;
++	if (win95_cdrom_controlled) CDROM_Interface_Image::images[25] = NULL;
++	win95_cdrom_controlled = false;
+ }
+ 
+ #include <dbp_serialize.h>
 diff --git a/src/hardware/keyboard.cpp b/src/hardware/keyboard.cpp
 index 77527ad..30bcc0a 100644
 --- a/src/hardware/keyboard.cpp
@@ -261,3 +431,193 @@ index 77527ad..30bcc0a 100644
  	case KBD_pause:
  		KEYBOARD_AddBuffer(0xe1);
  		KEYBOARD_AddBuffer(29|(pressed?0:0x80));
+diff --git a/src/ints/bios_disk.cpp b/src/ints/bios_disk.cpp
+index 661eba0..58b1faa 100644
+--- a/src/ints/bios_disk.cpp
++++ b/src/ints/bios_disk.cpp
+@@ -34,6 +34,7 @@
+ #ifdef C_DBP_SUPPORT_DISK_MOUNT_DOSFILE
+ #include <time.h>
+ #include <stdlib.h>
++#include <unistd.h>
+ 
+ struct discardDisk
+ {
+@@ -42,7 +43,7 @@ struct discardDisk
+ 	~discardDisk()
+ 	{
+ 		for (Bit8u* p : tempwrites)
+-			delete p;
++			free(p);
+ 	}
+ 
+ 	bool Read_AbsoluteSector(Bit32u sectnum, void* data, Bit32u sector_size)
+@@ -95,15 +96,41 @@ struct differencingDisk
+ 		{
+ 			saveFile = f;
+ 			char fhead[5];
+-			if (!fread(fhead, sizeof(fhead), 1, f) || memcmp(fhead, "FFDD\x1", sizeof(fhead))) goto invalid_file;
++			if (!fread(fhead, sizeof(fhead), 1, f) || memcmp(fhead, "FFDD\x1", sizeof(fhead)))
++				E_Exit("Invalid disk save header: %s (file preserved)", inSavePath);
++			fseek_wrap(f, 0, SEEK_END);
++			const Bit64u file_size = (Bit64u)ftell_wrap(f);
++			if (file_size >= NULL_CURSOR - 516) E_Exit("Disk save is too large: %s", inSavePath);
++			const Bit32u complete_end = 5 + (Bit32u)((file_size - 5) / 516) * 516;
++			if (complete_end != file_size)
++			{
++				// Preserve the exact interrupted write before repairing only its tail.
++				std::string backup = std::string(inSavePath) + ".recovery-XXXXXX";
++				std::vector<char> name(backup.begin(), backup.end()); name.push_back(0);
++				const int fd = mkstemp(name.data());
++				FILE* copy = (fd >= 0 ? fdopen(fd, "wb") : NULL);
++				if (!copy) { if (fd >= 0) close(fd); E_Exit("Cannot back up interrupted disk save: %s", inSavePath); }
++				fseek_wrap(f, 0, SEEK_SET);
++				Bit8u buffer[65536]; size_t count; bool ok = true;
++				while ((count = fread(buffer, 1, sizeof(buffer), f)))
++					if (fwrite(buffer, 1, count, copy) != count) { ok = false; break; }
++				ok = !ferror(f) && ok;
++				if (fflush(copy) || fsync(fileno(copy))) ok = false;
++				if (fclose(copy)) ok = false;
++				if (!ok || ftruncate(fileno(f), complete_end)) E_Exit("Cannot repair interrupted disk save: %s", inSavePath);
++				LOG_MSG("[DOSBOX] Recovered incomplete save tail; original at %s", name.data());
++			}
++			fseek_wrap(f, 5, SEEK_SET);
+ 			Bit32u cursor = sizeof(fhead);
+-			for (Bit32u sectnumval; fread(&sectnumval, sizeof(sectnumval), 1, f); cursor += (Bit32u)(sizeof(sectnumval) + BYTESPERSECTOR))
++			for (Bit32u sectnumval; cursor < complete_end && fread(&sectnumval, sizeof(sectnumval), 1, f); cursor += (Bit32u)(sizeof(sectnumval) + BYTESPERSECTOR))
+ 			{
+ 				fseek(f, BYTESPERSECTOR, SEEK_CUR);
+ 				if (sectnumval != 0xFFFFFFFF)
+ 				{
+ 					Bit32u sectnum = var_read(&sectnumval);
+-					if (sectnum >= sect_disk_end) goto invalid_file;
++					// Keep the file open and preserve foreign/corrupt records on disk.
++					// Never reinterpret file offsets as diffSectorBufs indices.
++					if (sectnum >= sect_disk_end) { LOG_MSG("[DOSBOX] Ignoring out-of-range saved sector %u in %s", sectnum, inSavePath); continue; }
+ 					if (sectnum >= diffSectors.size()) diffSectors.resize(sectnum + 1);
+ 					diffSectors[sectnum].cursor = cursor;
+ 				}
+@@ -111,13 +138,6 @@ struct differencingDisk
+ 			}
+ 			saveEndCursor = cursor;
+ 		}
+-		else if (0)
+-		{
+-			invalid_file:
+-			LOG_MSG("[DOSBOX] Invalid disk save file %s", inSavePath);
+-			fclose(f);
+-			saveFile = NULL;
+-		}
+ 		else
+ 		{
+ 			savePath = inSavePath; // remember until needed
+@@ -816,10 +836,16 @@ struct sparseVhd
+ 		if ((sparse_offset % BYTESPERSECTOR) || id->Read_AbsoluteSector((Bit32u)(sparse_offset / BYTESPERSECTOR), &vhd_sparse) || memcmp(vhd_sparse.cookie, "cxsparse", 8) || vhd_sparse.parent_unicode_name[0])
+ 			{ DBP_ASSERT(false); return NULL; } // invalid VHD
+ 
+-		const Bit64u disk_size = VHD_READ_BE64(vhd_footer.disk_size);
++		const Bit64u disk_size = VHD_READ_BE64(vhd_footer.current_size);
+ 		const Bit64u bat_offset = VHD_READ_BE64(vhd_sparse.bat_offset);
+ 		const Bit32u block_size = VHD_READ_BE32(vhd_sparse.block_size);
+ 		const Bit32u max_table_entries = VHD_READ_BE32(vhd_sparse.max_table_entries);
++		if (!disk_size || disk_size / 512 >= 0xFFFFFFFFULL || disk_size % 512 ||
++			block_size < 512 || (block_size & (block_size - 1)) ||
++			bat_offset < 1536 || bat_offset % 512 ||
++			bat_offset + (Bit64u)max_table_entries * 4 > (Bit64u)(numsectors - 1) * 512 ||
++			max_table_entries < (disk_size + block_size - 1) / block_size)
++			E_Exit("Invalid dynamic VHD geometry or block table");
+ 		const Bit32u calc_table_entries = (Bit32u)((disk_size + block_size - 1) / block_size);
+ 		const Bit32u bat_length = (max_table_entries < calc_table_entries ? max_table_entries : calc_table_entries);
+ 		const Bit32u sectors_per_block = ((block_size + (BYTESPERSECTOR-1)) / BYTESPERSECTOR);
+@@ -952,7 +978,8 @@ struct sparseVhd
+ 	INLINE void SeekTo(DOS_File* dos_file, Bit32u sectnum, EAction action)
+ 	{
+ 		Bit64u bytenum = (Bit64u)sectnum * BYTESPERSECTOR;
+-		if (last_action == action && current_fpos == bytenum) return;
++		// imageDisk geometry/raw reads share this DOS_File and can move its cursor.
++		// Do not trust a second, independent seek-position cache.
+ 		dos_file->Seek64(&bytenum, DOS_SEEK_SET);
+ 		current_fpos = bytenum;
+ 		last_action = action;
+@@ -1020,7 +1047,12 @@ struct sparseVhd
+ 			{
+ 				SeekTo(dos_file, bat[blocknum] + bitmap_sectors + blocksec, READ);
+ 				Bit16u read_size = (Bit16u)BYTESPERSECTOR;
+-				current_fpos += (dos_file->Read(cachedata, &read_size) ? read_size : 0);
++				if (!dos_file->Read(cachedata, &read_size) || read_size != BYTESPERSECTOR)
++				{
++					cacheSectorNumber[sectorHash] = (Bit32u)-1;
++					return 0x04;
++				}
++				current_fpos += read_size;
+ 			}
+ 		}
+ 		memcpy(data, cachedata, BYTESPERSECTOR);
+@@ -1234,7 +1266,7 @@ Bit8u imageDisk::Read_AbsoluteSector(Bit32u sectnum, void * data) {
+ 		return vhd->ReadSector(dos_file, sectnum, data);
+ 
+ 	Bit64u bytenum = (Bit64u)sectnum * sector_size;
+-	if (last_action==WRITE || bytenum!=current_fpos) dos_file->Seek64(&bytenum, DOS_SEEK_SET);
++	if (!dos_file->Seek64(&bytenum, DOS_SEEK_SET)) return 0x04;
+ 	DBP_ASSERT(sector_size <= 0xFFFF);
+ 	Bit16u read_size = (Bit16u)sector_size;
+ 	size_t ret=dos_file->Read((Bit8u*)data, &read_size)?read_size:0;
+@@ -1249,7 +1281,7 @@ Bit8u imageDisk::Read_AbsoluteSector(Bit32u sectnum, void * data) {
+ 	current_fpos=bytenum+ret;
+ 	last_action=READ;
+ 
+-	return 0x00;
++	return (ret == sector_size ? 0x00 : 0x04);
+ }
+ 
+ Bit8u imageDisk::Write_Sector(Bit32u head,Bit32u cylinder,Bit32u sector,void * data) {
+@@ -1274,13 +1306,15 @@ Bit8u imageDisk::Write_AbsoluteSector(Bit32u sectnum, void *data) {
+ 
+ 	if (differencing)
+ 	{
+-		Bit64u unmodified_fpos = (Bit64u)sectnum * differencingDisk::BYTESPERSECTOR;
+-		if (unmodified_fpos != current_fpos) dos_file->Seek64(&unmodified_fpos, DOS_SEEK_SET);
+-		current_fpos = unmodified_fpos + differencingDisk::BYTESPERSECTOR;
+ 		Bit8u buf[differencingDisk::BYTESPERSECTOR];
+-		Bit16u read_size = (Bit16u)differencingDisk::BYTESPERSECTOR;
+-		const void* unmodified = (dos_file->Read(buf, &read_size) ? buf : NULL);
+-		differencing->WriteDiff(sectnum, data, unmodified);
++		// Compare against the base's logical sector, not the VHD container offset.
++		// Going through Read_AbsoluteSector also keeps the underlying seek cache valid.
++		differencingDisk* overlay = differencing;
++		differencing = NULL;
++		const Bit8u result = Read_AbsoluteSector(sectnum, buf);
++		differencing = overlay;
++		if (result) return result;
++		overlay->WriteDiff(sectnum, data, buf);
+ 		return 0x00;
+ 	}
+ 
+@@ -1335,7 +1369,26 @@ void imageDisk::SetDifferencingDisk(const char* savePath)
+ 	if (discard) { delete discard; discard = NULL; }
+ 	if (differencing) delete differencing;
+ 	differencing = new differencingDisk();
+-	differencing->SetupSave(savePath, heads*cylinders*sectors);
++	// Windows can access LBA sectors beyond rounded-down CHS geometry.
++	Bit64u capacity = 0;
++	if (vhd) capacity = vhd->total_sectors;
++	else if (dos_file)
++	{
++		dos_file->Seek64(&capacity, DOS_SEEK_END);
++		dos_file->Seek64(&current_fpos, DOS_SEEK_SET);
++		capacity /= sector_size;
++	}
++	const Bit64u geometry = (Bit64u)heads * cylinders * sectors;
++	differencing->SetupSave(savePath, (Bit32u)std::max(capacity, geometry));
++}
++
++void imageDisk::FlushDifferencingDisk()
++{
++	if (differencing && differencing->saveFile)
++	{
++		fflush(differencing->saveFile);
++		fsync(fileno(differencing->saveFile));
++	}
+ }
+ 
+ bool imageDisk::ExportToFile(const char* path, bool vhd_format)

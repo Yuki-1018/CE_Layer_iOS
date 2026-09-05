@@ -1,13 +1,13 @@
 # CE_Layer_iOS — Windows 95 fixed machine for iPhone / iPad
 
-Windows 95 を「互換レイヤー」ではなく、x86 PC として iOS 上で動かす専用アプリです。汎用 VM 作成画面は持たず、Pentium MMX / 128 MB RAM / S3 SVGA / Sound Blaster 16 / IDE という固定構成で、ユーザー所有のセットアップ済み Windows 95 HDD を直接起動します。
+Windows 95 を「互換レイヤー」ではなく、x86 PC として iOS 上で動かす専用アプリです。汎用 VM 作成画面は持たず、Pentium / 128 MB RAM / S3 SVGA / Sound Blaster 16 / IDE という固定構成で、ユーザー所有のセットアップ済み Windows 95 HDD を直接起動します。
 
 GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリタ版コアをビルドし、コード署名なしの `Win95iOS-unsigned.ipa` を Artifact に出力します。
 
 ## 実装済み
 
 - DOSBox Pure の x86 interpreter を固定コミットからビルド（JIT/dynarec 無効）
-- Pentium MMX 命令セット、128 MB、実機で60 fpsを維持しやすい77000 cycles、S3 Trio64、SB16 の固定オプション
+- Pentium (`pentium_slow`)、128 MB、77000 cycles、S3 Trio64、SB16 の固定オプション（このコアではMMX無効のため `pentium_mmx` は使用しません）
 - raw `.img` / `.vhd` の BIOS 自動起動（DOSBox Pure のスタートメニューを表示しない）
 - 初回起動時やベースイメージ未配置時に表示する、iPhone横向きにも対応したイメージ選択画面
 - 512-byte sector 単位の永続 differencing disk
@@ -19,7 +19,7 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - タッチトラックパッド、長押しドラッグ、2本指右クリック／スクロール
 - iOS ソフトウェアキーボード、GameController HID 経由のUSB/Bluetooth物理キーボード、外部マウス／トラックパッド
 - UTM 型の特殊キーバー（Win/Ctrl/Alt/Shiftと文字・特殊キーの同時押し、Esc、Tab、矢印、F1〜F12、編集・ロックキー）
-- 複数 ISO/CUE/CHD の保存、専用一覧からの追加・mount・eject・削除（大容量イメージのストリーミング取込、安全な起動時mount）
+- 複数 ISO/CUE/CHD の保存、専用一覧からの追加・mount・eject・削除（ストリーミング取込、DOSのドライブ登録を経由しないATAPIメディア交換、起動・リセット時の再接続）
 - 別アイコンで判別できる pause/resume、一時停止状態の自動保存・次回復帰、hardware reset
 - Windows の正常な shutdown を検出したら DOSBox Pure のメニューを出さずアプリを終了
 - background 移行時と正常終了時の HDD overlay flush
@@ -53,7 +53,9 @@ scripts/validate_disk.sh path/to/win95-base.img
 
 `Actions` → `Build unsigned IPA` → `Run workflow` を実行します。実行画面ではホーム画面に表示するアプリ名、bundle ID、任意のカスタムアイコンURLを指定できます。アイコンは HTTPS で取得可能な1024×1024以上のPNG/JPEGを指定してください。空欄ならアイコンを追加せずにビルドします。完了後、Artifact `Win95iOS-unsigned` から IPA を取得できます。
 
-workflow は次を実行します。
+IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOの連続交換・読み出し・メモリ使用量、交換失敗時のメディア保持、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
+
+続いてIPAをビルドします。
 
 1. DOSBox Pure の固定 commit `7f6e8fb7385fa446d1444d671063268520bf9b54` を取得
 2. [iOS fixed-disk patch](patches/dosbox-pure-ios-fixed-disk.patch) を適用
@@ -110,6 +112,19 @@ Files > このiPhone/iPad内 > アプリ名 > Win95/
 
 通常の reset / power cycle でも overlay は維持されます。Windowsの書き込みはbackground移行時と正常終了時にも明示的にflushされます。
 
+可変長VHDでも差分は仮想ディスクの論理セクタに対して記録します。`.sav` 内の範囲外セクタはファイルを保持したまま読み飛ばし、有効なセクタを読み戻します。書きかけの末尾を検出した場合は、原本を同じフォルダの `.sav.recovery-XXXXXX` にバックアップしてから不完全な末尾だけを修復します。ヘッダー自体が壊れている保存データでは、削除せずエラーを表示します。これらは保存コンテナの復旧であり、Windows内ですでに壊れたファイルシステムの完全修復を保証するものではありません。
+
+CD読み込み時はISOの形式判定を先に行い、CUEとしての試し読みは1MBまでに制限します。ISO全体をCUEテキストとしてメモリへ取り込むことはありません。iOSの絶対パスからの読み込みはホストのファイルだけを参照し、Windows実行中のDOS用SDA/DTAやドライブ表にはアクセスしません。
+
+旧CDバックエンドからの更新時は `automatic-suspend.state` を `automatic-suspend.previous-core-UUID.state` へ退避し、一度通常起動します。必要なCDが見つからないときも、そのCDを前提とする一時停止状態は `.media-unavailable-UUID.state` へ退避します。HDDの `.sav` は削除しません。更新後に作成した一時停止状態は引き続き復元できます。
+
+ローカルで同じ回帰テストを実行する場合:
+
+```bash
+scripts/fetch_core.sh
+bash scripts/test_core_storage.sh
+```
+
 ## 操作
 
 - 右上の `≡` をタップ: コンパクトメニューを展開／折りたたみ
@@ -117,7 +132,7 @@ Files > このiPhone/iPad内 > アプリ名 > Win95/
 - キーボードアイコン: ソフトウェアキーボードを表示／非表示
 - 特殊キーバーの Win/Ctrl/Alt/Shift: 選択後に文字または特殊キーを押すと同時押しとして送信
 - `CD`: CD-ROM 管理画面を開く。保存済みイメージのタップでライブmount、`CDを取り出す` で eject、左スワイプで削除。Windowsやアプリを終了せずにATAPIメディアを交換します。
-- 旧ビルドで保存されたCD選択や、マウント中に異常終了した状態を検出した場合は、起動ループを防ぐため一度だけCDなしで安全起動します。
+- 保存したCD選択を次回起動時に再接続します。新しいATAPIバックエンドでのマウント中に異常終了した場合は一度だけCDなしで起動し、選択情報を保持して復旧を案内します。
 - `⏸` / `▶`: Windows の一時停止／再開（現在実行できる操作のアイコンを表示）。一時停止中にアプリを閉じた場合は、次回起動時に保存地点を復元して一時停止画面へ戻ります。
 - 1本指ドラッグ: マウスカーソル移動
 - タップ: 左クリック

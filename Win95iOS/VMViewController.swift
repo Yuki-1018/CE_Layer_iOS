@@ -229,15 +229,11 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     private var recoverablePersistedCDURL: URL? {
         let defaults = UserDefaults.standard
-        let hasLegacyUnsafeSelection = defaults.string(forKey: selectedCDKey) != nil &&
-            defaults.integer(forKey: cdMountStateVersionKey) < 2
-        if defaults.bool(forKey: cdMountInProgressKey) || hasLegacyUnsafeSelection {
+        // Retry selections from the old DOS mount backend using the new ATAPI
+        // backend. Only an interrupted operation on this backend gets a safe boot.
+        if defaults.bool(forKey: cdMountInProgressKey) && defaults.integer(forKey: cdMountStateVersionKey) >= 3 {
             defaults.removeObject(forKey: cdMountInProgressKey)
-            defaults.removeObject(forKey: selectedCDKey)
-            defaults.set(2, forKey: cdMountStateVersionKey)
             defaults.synchronize()
-            try? FileManager.default.removeItem(at: suspendStateURL)
-            try? FileManager.default.removeItem(at: suspendStateURL.appendingPathExtension("partial"))
             recoveredFromInterruptedCDMount = true
             return nil
         }
@@ -248,6 +244,20 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     private func startVM(disk: URL, CD: URL?, restoreSuspendState: Bool = true) {
+        do {
+            try preserveIncompatibleSuspendState()
+            if CD == nil, UserDefaults.standard.string(forKey: selectedCDKey) != nil {
+                try archiveSuspendState(reason: "media-unavailable")
+            }
+            let save = savesDirectory.appendingPathComponent("win95-base-CDRIVE.sav")
+            if FileManager.default.fileExists(atPath: save.path) {
+                let handle = try FileHandle(forReadingFrom: save)
+                defer { try? handle.close() }
+                guard try handle.read(upToCount: 5) == Data([70, 70, 68, 68, 1]) else {
+                    throw NSError(domain: "Win95UI", code: 8, userInfo: [NSLocalizedDescriptionKey: "Saves/win95-base-CDRIVE.sav のヘッダーが壊れているため起動を中止しました。原本は保持しています。ファイルアプリでバックアップしてから、同じベースイメージに対応する保存データを戻してください。"])
+                }
+            }
+        } catch { diskSetupView.setBusy(false); showError(error); return }
         activeDiskURL = disk
         activeCDURL = nil
         bridge.start(diskURL: disk) { [weak self] error in
@@ -260,13 +270,21 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 return
             }
             self.hideMissingDisk()
-            if restoreSuspendState, FileManager.default.fileExists(atPath: self.suspendStateURL.path) {
-                self.restoreAutomaticSuspendState()
-            } else {
-                self.startAudioIfNeeded()
+            let finishStartup = {
+                if restoreSuspendState, !self.recoveredFromInterruptedCDMount,
+                   FileManager.default.fileExists(atPath: self.suspendStateURL.path) {
+                    self.restoreAutomaticSuspendState()
+                } else {
+                    self.startAudioIfNeeded()
+                }
             }
-            if let CD { self.changeCD(to: CD, automatic: true) }
-            else if self.recoveredFromInterruptedCDMount {
+            if let CD {
+                // Restore ATAPI state only after its media has been attached.
+                self.changeCD(to: CD, automatic: true, afterChange: finishStartup)
+                return
+            }
+            finishStartup()
+            if self.recoveredFromInterruptedCDMount {
                 self.recoveredFromInterruptedCDMount = false
                 self.showError(NSError(
                     domain: "Win95UI",
@@ -275,6 +293,19 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 ))
             }
         }
+    }
+
+    private func preserveIncompatibleSuspendState() throws {
+        let defaults = UserDefaults.standard
+        guard defaults.integer(forKey: "SuspendStorageBackendVersion") < 3 else { return }
+        try archiveSuspendState(reason: "previous-core")
+        defaults.set(3, forKey: "SuspendStorageBackendVersion")
+    }
+
+    private func archiveSuspendState(reason: String) throws {
+        guard FileManager.default.fileExists(atPath: suspendStateURL.path) else { return }
+        let backup = savesDirectory.appendingPathComponent("automatic-suspend.\(reason)-\(UUID().uuidString).state")
+        try FileManager.default.moveItem(at: suspendStateURL, to: backup)
     }
 
     private func startAudioIfNeeded() {
@@ -557,6 +588,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         refreshCDLibrary(busy: true)
         toolbar.showActivity(true)
         let defaults = UserDefaults.standard
+        defaults.set(3, forKey: cdMountStateVersionKey)
         defaults.set(true, forKey: cdMountInProgressKey)
         defaults.synchronize()
 
@@ -568,15 +600,18 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             self.toolbar.showActivity(false)
             if let error {
                 if automatic {
-                    defaults.removeObject(forKey: self.selectedCDKey)
-                    defaults.synchronize()
+                    // Preserve the library selection so a temporary file error
+                    // does not silently forget the user's CD on the next launch.
+                    do { try self.archiveSuspendState(reason: "media-unavailable") }
+                    catch { self.showError(error) }
+                    self.startAudioIfNeeded()
                 }
                 self.showError(error)
             } else {
                 self.activeCDURL = CD
                 if let CD {
                     defaults.set(CD.lastPathComponent, forKey: self.selectedCDKey)
-                    defaults.set(2, forKey: self.cdMountStateVersionKey)
+                    defaults.set(3, forKey: self.cdMountStateVersionKey)
                 }
                 else { defaults.removeObject(forKey: self.selectedCDKey) }
                 defaults.synchronize()

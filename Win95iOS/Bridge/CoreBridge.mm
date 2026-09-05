@@ -20,6 +20,8 @@ extern "C" void dbp_win95_flush_disk(void);
 extern "C" bool dbp_win95_guest_shutdown(void);
 extern "C" void dbp_win95_send_key(unsigned keycode, bool pressed);
 extern "C" void dbp_win95_release_input(void);
+extern "C" int dbp_win95_change_cd(const char* path);
+extern "C" bool dbp_win95_disk_ready(void);
 
 static NSString * const Win95CoreErrorDomain = @"Win95Core";
 
@@ -51,8 +53,6 @@ struct Operation {
 };
 
 static __weak Win95CoreBridge *gBridge;
-static retro_disk_control_ext_callback gDiskControl = {};
-static bool gHasDiskControl = false;
 
 static NSError *CoreError(NSInteger code, NSString *description) {
     return [NSError errorWithDomain:Win95CoreErrorDomain
@@ -147,8 +147,6 @@ static void CoreLog(enum retro_log_level level, const char *format, ...) {
 
     std::mutex _operationMutex;
     std::deque<Operation> _operations;
-    std::unordered_map<std::string, unsigned> _cdImageIndices;
-    int _activeCDIndex;
 
     std::mutex _inputMutex;
     std::deque<KeyEvent> _keyEvents;
@@ -210,7 +208,6 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         _videoWidth = _videoHeight = _videoPitch = 0;
         _videoAspectRatio = 4.0 / 3.0;
         _videoGeneration = 0;
-        _activeCDIndex = -1;
         _saveDirectory = saveDirectory.fileSystemRepresentation;
         _systemDirectory = systemDirectory.fileSystemRepresentation;
         _options = {
@@ -229,7 +226,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             {"dosbox_pure_voodoo", "off"},
             {"dosbox_pure_voodoo_perf", "0"},
             {"dosbox_pure_memory_size", "128"},
-            {"dosbox_pure_cpu_type", "pentium_mmx"},
+            {"dosbox_pure_cpu_type", "pentium_slow"},
             {"dosbox_pure_cpu_core", "normal"},
             {"dosbox_pure_bootos_ramdisk", "diff"},
             {"dosbox_pure_bootos_forcenormal", "true"},
@@ -269,10 +266,6 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
 - (void)runDiskPath:(NSString *)path completion:(Win95Completion)completion {
     @autoreleasepool {
         gBridge = self;
-        gDiskControl = {};
-        gHasDiskControl = false;
-        _cdImageIndices.clear();
-        _activeCDIndex = -1;
         _contentPath = path.fileSystemRepresentation;
         _contentPath += "#I*SVGA (Super Video Graphics Array)";
 
@@ -287,8 +280,6 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         game.path = _contentPath.c_str();
         if (!retro_load_game(&game)) {
             retro_deinit();
-            gDiskControl = {};
-            gHasDiskControl = false;
             gBridge = nil;
             _running = false;
             [self finishOperation:completion error:CoreError(2, @"DOSBox Pure could not load the disk image.")];
@@ -303,11 +294,10 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
                 ? av.geometry.aspect_ratio
                 : (av.geometry.base_height ? (double)av.geometry.base_width / av.geometry.base_height : 4.0 / 3.0);
         }
-        [self finishOperation:completion error:nil];
-        if (self.statusHandler) dispatch_async(dispatch_get_main_queue(), ^{ self.statusHandler(@"Running"); });
-
         using Clock = std::chrono::steady_clock;
         auto deadline = Clock::now();
+        const auto startupDeadline = deadline + std::chrono::seconds(30);
+        bool started = false;
         while (!_stopRequested.load()) {
             @autoreleasepool {
                 [self processOperations];
@@ -315,6 +305,11 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
                 if (!_paused.load()) {
                     [self processKeyEvents];
                     retro_run();
+                    if (!started && dbp_win95_disk_ready()) {
+                        started = true;
+                        [self finishOperation:completion error:nil];
+                        if (self.statusHandler) dispatch_async(dispatch_get_main_queue(), ^{ self.statusHandler(@"Running"); });
+                    }
                     if (dbp_win95_guest_shutdown()) {
                         _guestShutdownRequested = true;
                         _stopRequested = true;
@@ -324,6 +319,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             }
             deadline += std::chrono::microseconds(16667);
             auto now = Clock::now();
+            if (!started && now >= startupDeadline) _stopRequested = true;
             if (deadline > now) std::this_thread::sleep_until(deadline);
             else deadline = now;
         }
@@ -334,13 +330,10 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         dbp_win95_flush_disk();
         retro_unload_game();
         retro_deinit();
-        gDiskControl = {};
-        gHasDiskControl = false;
-        _cdImageIndices.clear();
-        _activeCDIndex = -1;
         gBridge = nil;
         _running = false;
         _paused = false;
+        if (!started) [self finishOperation:completion error:CoreError(2, @"Windowsディスクの初期化に失敗しました。ベースイメージとSaves内の保存データを確認してください。保存データは削除されていません。")];
         const bool guestShutdown = _guestShutdownRequested.load();
         if (self.statusHandler) dispatch_async(dispatch_get_main_queue(), ^{
             self.statusHandler(guestShutdown ? @"Shutdown" : @"Stopped");
@@ -436,87 +429,21 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             case PendingOperation::ReleaseInput:
                 dbp_win95_release_input();
                 break;
-            case PendingOperation::MountCD: {
+            case PendingOperation::MountCD:
+            case PendingOperation::EjectCD: {
                 if (_stopRequested.load()) {
                     error = CoreError(8, @"The virtual machine is stopping.");
                     break;
                 }
-                if (!gHasDiskControl || !gDiskControl.set_eject_state || !gDiskControl.get_eject_state ||
-                    !gDiskControl.set_image_index || !gDiskControl.get_num_images ||
-                    !gDiskControl.add_image_index || !gDiskControl.replace_image_index) {
-                    error = CoreError(6, @"CD-ROM control is unavailable.");
-                    break;
+                const char *path = operation.kind == PendingOperation::MountCD ? operation.path.c_str() : nullptr;
+                const int result = dbp_win95_change_cd(path);
+                if (result == 2) {
+                    error = CoreError(6, @"CD-ROMの初期化がまだ完了していません。");
+                } else if (result != 1) {
+                    error = CoreError(7, @"CDイメージを開けませんでした。ファイル形式と、CUEの場合は参照先のBINファイルを確認してください。現在のCDは維持されています。");
                 }
-
-                const int previousIndex = _activeCDIndex;
-                auto existing = _cdImageIndices.find(operation.path);
-                unsigned index;
-                if (existing != _cdImageIndices.end()) {
-                    index = existing->second;
-                } else {
-                    index = gDiskControl.get_num_images();
-                }
-
-                if (previousIndex >= 0 && previousIndex != (int)index) {
-                    if (!gDiskControl.set_image_index((unsigned)previousIndex) ||
-                        (!gDiskControl.get_eject_state() &&
-                         (!gDiskControl.set_eject_state(true) || !gDiskControl.get_eject_state()))) {
-                        error = CoreError(7, @"The current CD image could not be ejected.");
-                        break;
-                    }
-                }
-
-                if (existing == _cdImageIndices.end()) {
-                    if (!gDiskControl.add_image_index()) {
-                        error = CoreError(7, @"The CD image slot could not be created.");
-                        break;
-                    }
-                    retro_game_info info = {};
-                    info.path = operation.path.c_str();
-                    // DOSBox Pure's replace callback unmounts its currently selected
-                    // image. Select the new empty slot first so the boot HDD can
-                    // never be treated as the image being replaced.
-                    if (!gDiskControl.set_image_index(index) ||
-                        !gDiskControl.replace_image_index(index, &info)) {
-                        if (previousIndex >= 0 && gDiskControl.set_image_index((unsigned)previousIndex)) {
-                            gDiskControl.set_eject_state(false);
-                        }
-                        error = CoreError(7, @"The CD image could not be registered.");
-                        break;
-                    }
-                    _cdImageIndices.emplace(operation.path, index);
-                }
-
-                if (!gDiskControl.set_image_index(index) ||
-                    (gDiskControl.get_eject_state() && !gDiskControl.set_eject_state(false)) ||
-                    gDiskControl.get_eject_state()) {
-                    if (previousIndex >= 0 && previousIndex != (int)index &&
-                        gDiskControl.set_image_index((unsigned)previousIndex)) {
-                        gDiskControl.set_eject_state(false);
-                    }
-                    error = CoreError(7, @"The CD image could not be mounted.");
-                    break;
-                }
-                _activeCDIndex = (int)index;
                 break;
             }
-            case PendingOperation::EjectCD:
-                if (_stopRequested.load()) {
-                    error = CoreError(8, @"The virtual machine is stopping.");
-                    break;
-                }
-                if (_activeCDIndex >= 0) {
-                    if (!gHasDiskControl || !gDiskControl.set_eject_state || !gDiskControl.get_eject_state ||
-                        !gDiskControl.set_image_index ||
-                        !gDiskControl.set_image_index((unsigned)_activeCDIndex) ||
-                        (!gDiskControl.get_eject_state() && !gDiskControl.set_eject_state(true)) ||
-                        !gDiskControl.get_eject_state()) {
-                        error = CoreError(7, @"The current CD image could not be ejected.");
-                    } else {
-                        _activeCDIndex = -1;
-                    }
-                }
-                break;
             case PendingOperation::None:
                 break;
         }
@@ -648,12 +575,6 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
             return *(retro_pixel_format *)data == RETRO_PIXEL_FORMAT_XRGB8888;
         case RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK:
             return true;
-        case RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE:
-            gDiskControl = *static_cast<retro_disk_control_ext_callback *>(data);
-            gHasDiskControl = true;
-            return true;
-        case RETRO_ENVIRONMENT_GET_DISK_CONTROL_INTERFACE_VERSION:
-            *(unsigned *)data = 1; return true;
         case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
             static_cast<retro_log_callback *>(data)->log = CoreLog; return true;
         case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:

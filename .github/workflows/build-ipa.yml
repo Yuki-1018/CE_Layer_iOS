@@ -25,7 +25,18 @@ permissions:
   contents: read
 
 jobs:
+  storage-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned emulator core
+        run: scripts/fetch_core.sh
+      - name: Test disk persistence and live ATAPI media changes
+        run: bash scripts/test_core_storage.sh
+
   build:
+    needs: storage-tests
     runs-on: macos-15
     timeout-minutes: 60
     env:

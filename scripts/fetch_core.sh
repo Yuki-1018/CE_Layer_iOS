@@ -17,14 +17,11 @@ else
   git -C "$CORE_DIR" checkout --detach "$CORE_COMMIT"
 fi
 
-if ! git -C "$CORE_DIR" apply --check "$ROOT_DIR/patches/dosbox-pure-ios-fixed-disk.patch" 2>/dev/null; then
-  if git -C "$CORE_DIR" diff --quiet; then
-    echo "The DOSBox Pure patch cannot be applied cleanly." >&2
-    exit 1
-  fi
-else
+if git -C "$CORE_DIR" apply --check "$ROOT_DIR/patches/dosbox-pure-ios-fixed-disk.patch" 2>/dev/null; then
   git -C "$CORE_DIR" apply "$ROOT_DIR/patches/dosbox-pure-ios-fixed-disk.patch"
+elif ! git -C "$CORE_DIR" apply --reverse --check "$ROOT_DIR/patches/dosbox-pure-ios-fixed-disk.patch" 2>/dev/null; then
+  echo "The core contains an older or different patch. Preserve Vendor/dosbox-pure elsewhere and fetch a fresh core; existing changes were not modified." >&2
+  exit 1
 fi
 
 echo "DOSBox Pure $CORE_COMMIT is ready."
-
