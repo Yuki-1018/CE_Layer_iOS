@@ -125,6 +125,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         let keyboardButton = toolbar.addButton("", target: self, action: #selector(showKeyboard), hint: "Keyboard")
         let keyboardSymbol = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
         keyboardButton.setImage(UIImage(systemName: "keyboard", withConfiguration: keyboardSymbol), for: .normal)
+        toolbar.addButton("DOS", target: self, action: #selector(toggleDOSFullScreen), hint: "DOS full screen (Alt+Enter)")
         toolbar.addButton("CD", target: self, action: #selector(showCDMenu), hint: "CD images")
         pauseButton = toolbar.addButton("", target: self, action: #selector(togglePause), hint: "Pause")
         updatePauseButton()
@@ -652,6 +653,16 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     @objc private func showKeyboard() {
         if keyboardCapture.isFirstResponder { keyboardCapture.dismissKeyboard() }
         else { keyboardCapture.becomeFirstResponder() }
+    }
+
+    // Localized Windows 95 OSR2 builds can fail to repaint a windowed DOS VM.
+    // Full-screen DOS uses a different VGA path and avoids that guest/core bug.
+    @objc private func toggleDOSFullScreen() {
+        guard bridge.isRunning, !bridge.isPaused else { return }
+        bridge.sendKey(RetroKey.leftAlt, pressed: true)
+        bridge.sendKey(RetroKey.enter, pressed: true)
+        bridge.sendKey(RetroKey.enter, pressed: false)
+        bridge.sendKey(RetroKey.leftAlt, pressed: false)
     }
 
     @objc private func trackpadPan(_ recognizer: UIPanGestureRecognizer) {

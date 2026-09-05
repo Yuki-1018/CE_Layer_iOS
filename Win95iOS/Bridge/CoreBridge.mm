@@ -1,13 +1,18 @@
 #import "CoreBridge.h"
+#import "SlirpBridge.h"
 
 #include <libretro.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <fcntl.h>
+#include <limits>
 #include <mutex>
+#include <poll.h>
 #include <string>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -22,6 +27,7 @@ extern "C" void dbp_win95_send_key(unsigned keycode, bool pressed);
 extern "C" void dbp_win95_release_input(void);
 extern "C" int dbp_win95_change_cd(const char* path);
 extern "C" bool dbp_win95_disk_ready(void);
+extern "C" void dbp_win95_set_nat_active(bool active);
 
 static NSString * const Win95CoreErrorDomain = @"Win95Core";
 
@@ -50,6 +56,12 @@ struct Operation {
     PendingOperation kind = PendingOperation::None;
     std::string path;
     Win95Completion completion = nil;
+};
+
+struct NetworkTimer {
+    SlirpTimerCb callback = nullptr;
+    void *callbackOpaque = nullptr;
+    int64_t expiration = std::numeric_limits<int64_t>::max();
 };
 
 static __weak Win95CoreBridge *gBridge;
@@ -155,6 +167,11 @@ static void CoreLog(enum retro_log_level level, const char *format, ...) {
     std::string _systemDirectory;
     std::string _contentPath;
     std::unordered_map<std::string, std::string> _options;
+
+    Slirp *_slirp;
+    retro_netpacket_callback _networkCallbacks;
+    std::vector<NetworkTimer *> _networkTimers;
+    std::vector<pollfd> _networkPollFDs;
 }
 - (void)runDiskPath:(NSString *)path completion:(Win95Completion)completion;
 - (void)processOperations;
@@ -164,6 +181,15 @@ static void CoreLog(enum retro_log_level level, const char *format, ...) {
 - (void)receiveVideo:(const void *)data width:(unsigned)width height:(unsigned)height pitch:(size_t)pitch;
 - (size_t)receiveAudio:(const int16_t *)data frames:(size_t)frames;
 - (int16_t)inputStatePort:(unsigned)port device:(unsigned)device index:(unsigned)index identifier:(unsigned)identifier;
+- (void)startNetworkWithCallbacks:(const retro_netpacket_callback *)callbacks;
+- (void)stopNetwork;
+- (void)pollNetwork;
+- (void)sendEthernetFrameToGuest:(const void *)data length:(size_t)length;
+- (void)receiveNetworkPacketFromCore:(const void *)data length:(size_t)length;
+- (void *)createNetworkTimer:(SlirpTimerCb)callback callbackOpaque:(void *)callbackOpaque;
+- (void)freeNetworkTimer:(void *)timer;
+- (int)addNetworkPollFD:(int)fd events:(int)events;
+- (int)networkPollEventsAtIndex:(int)index;
 @end
 
 static bool EnvironmentCallback(unsigned command, void *data) {
@@ -188,6 +214,53 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
     return bridge ? [bridge inputStatePort:port device:device index:index identifier:identifier] : 0;
 }
 
+static void NetworkPacketFromCore(int, const void *data, size_t length, uint16_t) {
+    Win95CoreBridge *bridge = gBridge;
+    if (bridge) [bridge receiveNetworkPacketFromCore:data length:length];
+}
+
+static void NetworkPollReceive(void) {}
+
+static ssize_t NetworkPacketToGuest(const void *data, size_t length, void *opaque) {
+    Win95CoreBridge *bridge = (__bridge Win95CoreBridge *)opaque;
+    [bridge sendEthernetFrameToGuest:data length:length];
+    return static_cast<ssize_t>(length);
+}
+
+static void NetworkGuestError(const char *message, void *) {
+    fprintf(stderr, "[libslirp:guest] %s\n", message ? message : "unknown error");
+}
+
+static int64_t NetworkClockNS(void *) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static void *NetworkTimerNew(SlirpTimerCb callback, void *callbackOpaque, void *opaque) {
+    return [(__bridge Win95CoreBridge *)opaque createNetworkTimer:callback callbackOpaque:callbackOpaque];
+}
+
+static void NetworkTimerFree(void *timer, void *opaque) {
+    [(__bridge Win95CoreBridge *)opaque freeNetworkTimer:timer];
+}
+
+static void NetworkTimerMod(void *timer, int64_t expiration, void *) {
+    static_cast<NetworkTimer *>(timer)->expiration = expiration;
+}
+
+static void NetworkPollFDChanged(int, void *) {}
+static void NetworkNotify(void *) {}
+
+static int NetworkAddPollFD(int fd, int events, void *opaque) {
+    Win95CoreBridge *bridge = (__bridge Win95CoreBridge *)opaque;
+    return [bridge addNetworkPollFD:fd events:events];
+}
+
+static int NetworkGetPollEvents(int index, void *opaque) {
+    Win95CoreBridge *bridge = (__bridge Win95CoreBridge *)opaque;
+    return [bridge networkPollEventsAtIndex:index];
+}
+
 @implementation Win95CoreBridge
 
 - (instancetype)initWithSaveDirectory:(NSURL *)saveDirectory systemDirectory:(NSURL *)systemDirectory {
@@ -208,6 +281,8 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         _videoWidth = _videoHeight = _videoPitch = 0;
         _videoAspectRatio = 4.0 / 3.0;
         _videoGeneration = 0;
+        _slirp = nullptr;
+        memset(&_networkCallbacks, 0, sizeof(_networkCallbacks));
         _saveDirectory = saveDirectory.fileSystemRepresentation;
         _systemDirectory = systemDirectory.fileSystemRepresentation;
         _options = {
@@ -279,6 +354,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         retro_game_info game = {};
         game.path = _contentPath.c_str();
         if (!retro_load_game(&game)) {
+            [self stopNetwork];
             retro_deinit();
             gBridge = nil;
             _running = false;
@@ -304,6 +380,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
                 if (_resetRequested.exchange(false)) retro_reset();
                 if (!_paused.load()) {
                     [self processKeyEvents];
+                    [self pollNetwork];
                     retro_run();
                     if (!started && dbp_win95_disk_ready()) {
                         started = true;
@@ -328,6 +405,7 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         // suspend write) while the libretro instance is still valid.
         [self processOperations];
         dbp_win95_flush_disk();
+        [self stopNetwork];
         retro_unload_game();
         retro_deinit();
         gBridge = nil;
@@ -557,6 +635,133 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
     }
 }
 
+- (void)startNetworkWithCallbacks:(const retro_netpacket_callback *)callbacks {
+    [self stopNetwork];
+    if (!callbacks || !callbacks->start || !callbacks->receive || !callbacks->poll) return;
+
+    _networkCallbacks = *callbacks;
+    struct in_addr network = {}, netmask = {}, host = {}, dhcp = {}, dns = {};
+    struct in6_addr emptyIPv6 = {};
+    inet_pton(AF_INET, "10.0.2.0", &network);
+    inet_pton(AF_INET, "255.255.255.0", &netmask);
+    inet_pton(AF_INET, "10.0.2.2", &host);
+    inet_pton(AF_INET, "10.0.2.15", &dhcp);
+    inet_pton(AF_INET, "10.0.2.3", &dns);
+
+    static const SlirpCb slirpCallbacks = {
+        NetworkPacketToGuest, NetworkGuestError, NetworkClockNS,
+        NetworkTimerNew, NetworkTimerFree, NetworkTimerMod,
+        NetworkPollFDChanged, NetworkPollFDChanged, NetworkNotify
+    };
+    _slirp = slirp_init(
+        0, true, network, netmask, host,
+        false, emptyIPv6, 0, emptyIPv6, "windows95",
+        nullptr, nullptr, nullptr, dhcp, dns, emptyIPv6,
+        nullptr, nullptr, &slirpCallbacks, (__bridge void *)self
+    );
+    if (!_slirp) {
+        memset(&_networkCallbacks, 0, sizeof(_networkCallbacks));
+        dbp_win95_set_nat_active(false);
+        fprintf(stderr, "[libslirp] User-mode network initialization failed.\n");
+        return;
+    }
+
+    // Let libslirp, rather than DOSBox Pure's multiplayer-only DHCP helper,
+    // own DHCP/DNS and the 10.0.2.0/24 private network.
+    dbp_win95_set_nat_active(true);
+    _networkCallbacks.start(0, NetworkPacketFromCore, NetworkPollReceive);
+    fprintf(stderr, "[libslirp] NAT started with libslirp %s.\n", slirp_version_string());
+}
+
+- (void)stopNetwork {
+    if (_networkCallbacks.stop) _networkCallbacks.stop();
+    if (_slirp) {
+        slirp_cleanup(_slirp);
+        _slirp = nullptr;
+    }
+    // A well-behaved libslirp cleanup frees every timer. Dispose of anything
+    // an older runtime left behind before another VM boot reuses this bridge.
+    for (NetworkTimer *timer : _networkTimers) delete timer;
+    _networkTimers.clear();
+    _networkPollFDs.clear();
+    memset(&_networkCallbacks, 0, sizeof(_networkCallbacks));
+    dbp_win95_set_nat_active(false);
+}
+
+- (void)pollNetwork {
+    if (!_slirp) return;
+
+    // This call moves complete NE2K frames from the core into slirp_input.
+    _networkCallbacks.poll();
+
+    const int64_t now = NetworkClockNS(nullptr);
+    const std::vector<NetworkTimer *> timers = _networkTimers;
+    for (NetworkTimer *timer : timers) {
+        // A callback may delete another timer, so confirm it still belongs to
+        // slirp before dereferencing the pointer copied above.
+        if (std::find(_networkTimers.begin(), _networkTimers.end(), timer) != _networkTimers.end() &&
+            timer->expiration <= now) {
+            timer->expiration = std::numeric_limits<int64_t>::max();
+            timer->callback(timer->callbackOpaque);
+        }
+    }
+
+    _networkPollFDs.clear();
+    uint32_t timeout = 0;
+    slirp_pollfds_fill(_slirp, &timeout, NetworkAddPollFD, (__bridge void *)self);
+    const int pollResult = poll(_networkPollFDs.data(), static_cast<nfds_t>(_networkPollFDs.size()), 0);
+    slirp_pollfds_poll(_slirp, pollResult < 0, NetworkGetPollEvents, (__bridge void *)self);
+}
+
+- (void)receiveNetworkPacketFromCore:(const void *)data length:(size_t)length {
+    // DOSBox Pure prefixes Ethernet frames with its internal NE2K packet type.
+    if (!_slirp || !data || length <= 1 || static_cast<const uint8_t *>(data)[0] != 1) return;
+    if (length - 1 > static_cast<size_t>(std::numeric_limits<int>::max())) return;
+    slirp_input(_slirp, static_cast<const uint8_t *>(data) + 1, static_cast<int>(length - 1));
+}
+
+- (void)sendEthernetFrameToGuest:(const void *)data length:(size_t)length {
+    if (!_networkCallbacks.receive || !data || !length || length > 65535) return;
+    std::vector<uint8_t> packet(length + 1);
+    packet[0] = 1; // DBP_Net::PKT_NE2K
+    memcpy(packet.data() + 1, data, length);
+    _networkCallbacks.receive(packet.data(), packet.size(), 0xFFFE);
+}
+
+- (void *)createNetworkTimer:(SlirpTimerCb)callback callbackOpaque:(void *)callbackOpaque {
+    NetworkTimer *timer = new NetworkTimer{callback, callbackOpaque, std::numeric_limits<int64_t>::max()};
+    _networkTimers.push_back(timer);
+    return timer;
+}
+
+- (void)freeNetworkTimer:(void *)timerPointer {
+    NetworkTimer *timer = static_cast<NetworkTimer *>(timerPointer);
+    const auto found = std::find(_networkTimers.begin(), _networkTimers.end(), timer);
+    if (found != _networkTimers.end()) _networkTimers.erase(found);
+    delete timer;
+}
+
+- (int)addNetworkPollFD:(int)fd events:(int)events {
+    short nativeEvents = 0;
+    if (events & SLIRP_POLL_IN) nativeEvents |= POLLIN;
+    if (events & SLIRP_POLL_OUT) nativeEvents |= POLLOUT;
+    if (events & SLIRP_POLL_PRI) nativeEvents |= POLLPRI;
+    _networkPollFDs.push_back({fd, nativeEvents, 0});
+    return static_cast<int>(_networkPollFDs.size() - 1);
+}
+
+- (int)networkPollEventsAtIndex:(int)index {
+    if (index < 0 || static_cast<size_t>(index) >= _networkPollFDs.size()) return 0;
+    const short events = _networkPollFDs[index].revents;
+    int result = 0;
+    if (events & POLLIN) result |= SLIRP_POLL_IN;
+    if (events & POLLOUT) result |= SLIRP_POLL_OUT;
+    if (events & POLLPRI) result |= SLIRP_POLL_PRI;
+    if (events & POLLERR) result |= SLIRP_POLL_ERR;
+    if (events & POLLHUP) result |= SLIRP_POLL_HUP;
+    return result;
+}
+
 - (bool)environmentCommand:(unsigned)command data:(void *)data {
     switch (command) {
         case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
@@ -599,6 +804,9 @@ static int16_t InputStateCallback(unsigned port, unsigned device, unsigned index
         case RETRO_ENVIRONMENT_SET_MEMORY_MAPS:
         case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
             return true;
+        case RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE:
+            [self startNetworkWithCallbacks:static_cast<const retro_netpacket_callback *>(data)];
+            return _slirp != nullptr;
         case RETRO_ENVIRONMENT_SET_GEOMETRY: {
             const retro_game_geometry *geometry = static_cast<const retro_game_geometry *>(data);
             std::lock_guard<std::mutex> lock(_videoMutex);

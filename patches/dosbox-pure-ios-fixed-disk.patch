@@ -1,5 +1,5 @@
 diff --git a/dosbox_pure_libretro.cpp b/dosbox_pure_libretro.cpp
-index ec99bf3..47159a3 100644
+index ec99bf3..b898680 100644
 --- a/dosbox_pure_libretro.cpp
 +++ b/dosbox_pure_libretro.cpp
 @@ -39,6 +39,7 @@
@@ -10,15 +10,16 @@ index ec99bf3..47159a3 100644
  #include <string>
  #include <sstream>
  
-@@ -60,6 +61,7 @@ static retro_system_av_info av_info;
+@@ -60,6 +61,8 @@ static retro_system_av_info av_info;
  static enum DBP_State : Bit8u { DBPSTATE_BOOT, DBPSTATE_EXITED, DBPSTATE_SHUTDOWN, DBPSTATE_REBOOT, DBPSTATE_FIRST_FRAME, DBPSTATE_RUNNING } dbp_state;
  static enum DBP_SerializeMode : Bit8u { DBPSERIALIZE_STATES, DBPSERIALIZE_REWIND, DBPSERIALIZE_DISABLED } dbp_serializemode;
  static bool dbp_game_running, dbp_pause_events, dbp_paused_midframe, dbp_frame_pending, dbp_biosreboot, dbp_biospoweroff, dbp_system_cached, dbp_system_scannable, dbp_refresh_memmaps;
 +static std::atomic_bool dbp_win95_poweroff_requested{false};
++static std::atomic_bool dbp_win95_nat_active{false};
  static bool dbp_optionsupdatecallback, dbp_reboot_set64mem, dbp_use_network, dbp_had_game_running, dbp_strict_mode, dbp_legacy_save, dbp_wasloaded, dbp_skip_c_mount;
  static signed char dbp_menu_time, dbp_conf_loading, dbp_reboot_machine;
  static Bit8u dbp_alphablend_base;
-@@ -108,7 +110,7 @@ static const char* DBP_KBDNAMES[KBD_LAST+1] =
+@@ -108,7 +111,7 @@ static const char* DBP_KBDNAMES[KBD_LAST+1] =
  	"F1","F2","F3","F4","F5","F6","F7","F8","F9","F10","F11","F12","Esc","Tab","Backspace","Enter","Space","Left-Alt","Right-Alt","Left-Ctrl","Right-Ctrl","Left-Shift","Right-Shift",
  	"Caps-Lock","Scroll-Lock","Num-Lock","Grave `","Minus -","Equals =","Backslash","Left-Bracket [","Right-Bracket ]","Semicolon ;","Quote '","Period .","Comma ,","Slash /","Backslash \\",
  	"Print-Screen","Pause","Insert","Home","Page-Up","Delete","End","Page-Down","Left","Up","Down","Right","NP-1","NP-2","NP-3","NP-4","NP-5","NP-6","NP-7","NP-8","NP-9","NP-0",
@@ -27,7 +28,7 @@ index ec99bf3..47159a3 100644
  };
  static const char* DBP_YMLKeyCommands[KBD_LAST+3] =
  {
-@@ -116,7 +118,7 @@ static const char* DBP_YMLKeyCommands[KBD_LAST+3] =
+@@ -116,7 +119,7 @@ static const char* DBP_YMLKeyCommands[KBD_LAST+3] =
  	"f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12","esc","tab","backspace","enter","space","leftalt","rightalt","leftctrl","rightctrl","leftshift","rightshift",
  	"capslock","scrolllock","numlock","grave","minus","equals","backslash","leftbracket","rightbracket","semicolon","quote","period","comma","slash","extra_lt_gt",
  	"printscreen","pause","insert","home","pageup","delete","end","pagedown","left","up","down","right","kp1","kp2","kp3","kp4","kp5","kp6","kp7","kp8","kp9","kp0",
@@ -36,7 +37,7 @@ index ec99bf3..47159a3 100644
  	"wait","waitmodechange","delay"
  };
  static std::vector<DBP_InputBind> dbp_input_binds;
-@@ -320,6 +322,7 @@ int MSCDEX_AddDrive(char driveLetter, const char* physicalPath, Bit8u& subUnit);
+@@ -320,6 +323,7 @@ int MSCDEX_AddDrive(char driveLetter, const char* physicalPath, Bit8u& subUnit);
  int MSCDEX_RemoveDrive(char driveLetter);
  void IDE_RefreshCDROMs();
  void IDE_SetupControllers(bool alwaysHaveCDROM);
@@ -44,7 +45,7 @@ index ec99bf3..47159a3 100644
  void NET_SetupEthernet();
  bool MIDI_TSF_SwitchSF(const char*);
  const char* DBP_MIDI_StartupError(Section* midisec, const char*& arg);
-@@ -1302,6 +1305,7 @@ void DBP_OnBIOSReboot()
+@@ -1302,6 +1306,7 @@ void DBP_OnBIOSReboot()
  void DBP_OnBIOSPoweroff()
  {
  	// to be called on the DOSBox thread
@@ -52,7 +53,7 @@ index ec99bf3..47159a3 100644
  	dbp_biosreboot = true;
  	dbp_biospoweroff = true;
  	if (first_shell) DBP_DOSBOX_ForceShutdown();
-@@ -2908,7 +2912,9 @@ void retro_init(void) //#3
+@@ -2908,7 +2913,9 @@ void retro_init(void) //#3
  		{RETROK_KP9, KBD_kp9}, {RETROK_KP0, KBD_kp0}, {RETROK_KP_DIVIDE, KBD_kpdivide},
  		{RETROK_KP_MULTIPLY, KBD_kpmultiply}, {RETROK_KP_MINUS, KBD_kpminus},
  		{RETROK_KP_PLUS, KBD_kpplus}, {RETROK_KP_ENTER, KBD_kpenter}, {RETROK_KP_PERIOD, KBD_kpperiod},
@@ -63,7 +64,7 @@ index ec99bf3..47159a3 100644
  	};
  	for (int i = 0; i != (sizeof(keymap)/sizeof(keymap[0])); i++)
  	{
-@@ -2966,7 +2972,9 @@ void retro_init(void) //#3
+@@ -2966,7 +2973,9 @@ void retro_init(void) //#3
  		static bool RETRO_CALLCONV set_image_index(unsigned index)
  		{
  			if (index >= dbp_images.size()) return false;
@@ -73,7 +74,7 @@ index ec99bf3..47159a3 100644
  			return true;
  		}
  
-@@ -2978,6 +2986,7 @@ void retro_init(void) //#3
+@@ -2978,6 +2987,7 @@ void retro_init(void) //#3
  		static bool RETRO_CALLCONV replace_image_index(unsigned index, const struct retro_game_info *info)
  		{
  			if (index >= dbp_images.size()) return false;
@@ -81,7 +82,7 @@ index ec99bf3..47159a3 100644
  			if (dbp_images[dbp_image_index].mounted)
  				DBP_Unmount(dbp_images[dbp_image_index].drive);
  			if (info == NULL)
-@@ -2994,14 +3003,17 @@ void retro_init(void) //#3
+@@ -2994,14 +3004,17 @@ void retro_init(void) //#3
  				dbp_images[index].dirlen = (int)((lastSlash && lastSlash > lastBackSlash ? lastSlash + 1 : (lastBackSlash ? lastBackSlash + 1 : info->path)) - info->path);
  				dbp_images[index].dd = 0;
  			}
@@ -99,7 +100,7 @@ index ec99bf3..47159a3 100644
  			return true;
  		}
  
-@@ -3067,6 +3079,8 @@ void retro_init(void) //#3
+@@ -3067,6 +3080,8 @@ void retro_init(void) //#3
  
  bool retro_load_game(const struct retro_game_info *info) //#4
  {
@@ -108,7 +109,7 @@ index ec99bf3..47159a3 100644
  	#ifndef DBP_STANDALONE
  	enum retro_pixel_format pixel_format = RETRO_PIXEL_FORMAT_XRGB8888;
  	if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &pixel_format))
-@@ -3377,6 +3391,63 @@ void retro_reset(void)
+@@ -3377,6 +3392,73 @@ void retro_reset(void)
  		input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)));
  }
  
@@ -123,6 +124,16 @@ index ec99bf3..47159a3 100644
 +	const int result = IDE_Win95ChangeCD(path);
 +	DBP_ThreadControl(TCM_RESUME_FRAME);
 +	return result;
++}
++
++extern "C" void dbp_win95_set_nat_active(bool active)
++{
++	dbp_win95_nat_active.store(active);
++}
++
++extern "C" bool dbp_win95_nat_is_active(void)
++{
++	return dbp_win95_nat_active.load();
 +}
 +
 +extern "C" bool dbp_win95_disk_ready(void)
@@ -172,6 +183,15 @@ index ec99bf3..47159a3 100644
  void retro_run_touchpad(bool has_press, Bit16s absx, Bit16s absy)
  {
  	static Bit8u last_presses, down_btn, is_move, is_tap;
+@@ -3446,7 +3528,7 @@ void retro_run(void)
+ 	static Bit8u fpsboost_count = 0, last_fpsboost = 1;
+ 	Bit8u next_fpsboost = 1, fpsboost = 1;
+ 	extern bool dbp_net_connected;
+-	if (dbp_net_connected)
++	if (dbp_net_connected && !dbp_win95_nat_active.load())
+ 	{
+ 		// Increase the rate retro_run is called during multiplayer. This can significantly improve network performance for games running in lock-step by giving the frontend more chances to send and receive packets.
+ 		fpsboost = ((dbp_throttle.mode == RETRO_THROTTLE_NONE && dbp_throttle.rate > (av_info.timing.fps * 1.5)) ? (int)(dbp_throttle.rate / av_info.timing.fps + .499) : 1);
 diff --git a/dosbox_pure_run.h b/dosbox_pure_run.h
 index a942090..f522d2f 100644
 --- a/dosbox_pure_run.h
@@ -258,6 +278,27 @@ index 8d8bf0b..d965b11 100644
  
  	
  	KBD_LAST
+diff --git a/src/dbp_network.cpp b/src/dbp_network.cpp
+index 8ee32c2..0a1bcec 100644
+--- a/src/dbp_network.cpp
++++ b/src/dbp_network.cpp
+@@ -37,6 +37,8 @@
+ #include <stdarg.h> /* va_list */
+ #include <stdlib.h> /* realloc, free */ 
+ 
++extern "C" bool dbp_win95_nat_is_active(void);
++
+ struct DBP_Net
+ {
+ 	enum { FIRST_MAC_OCTET = 0xde }; // has locally administered address bit (0x02) set
+@@ -1804,6 +1806,7 @@ struct NE2K
+ 			};
+ 			const DHCPPacket& inp = *(const DHCPPacket*)&s.mem[s.tx_page_start*256 - BX_NE2K_MEMSTART];
+ 			if (s.tx_bytes >= sizeof(DHCPPacket)
++				&& !dbp_win95_nat_is_active()
+ 				&& inp.dhcp_cookie[0] == 0x63 && inp.dhcp_cookie[1] == 0x82 && inp.dhcp_cookie[2] == 0x53 && inp.dhcp_cookie[3] == 0x63 && inp.dhcp_bootmsgtype == 1
+ 				&& inp.eth_dest_mac[0] == 0xFF && inp.eth_type_and_length[0] == 0x8 && inp.ip_protocol == 17 && inp.udp_srcport[1] == 68 && inp.udp_destport[1] == 67
+ 				&& s.DCR.loop != 0 && s.TCR.loop_cntl == 0) // don't receive in loopback modes
 diff --git a/src/dos/cdrom_image.cpp b/src/dos/cdrom_image.cpp
 index 047d19d..870376f 100644
 --- a/src/dos/cdrom_image.cpp

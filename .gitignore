@@ -2,8 +2,10 @@
 DerivedData/
 build/
 Vendor/dosbox-pure/
+Vendor/UTMFrameworks/
 Win95iOS/BundledContent/*.img
 Win95iOS/BundledContent/*.vhd
 Win95iOS/BundledContent/*.iso
 Win95iOS/BundledContent/DOSBOX-*
+Win95iOS/BundledContent/UTM-DEPENDENCY-LICENSES.plist
 !Win95iOS/BundledContent/.gitkeep

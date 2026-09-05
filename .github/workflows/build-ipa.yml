@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch pinned emulator core
         run: scripts/fetch_core.sh
-      - name: Test disk persistence and live ATAPI media changes
+      - name: Test core networking hooks, disk persistence and live ATAPI media changes
         run: bash scripts/test_core_storage.sh
 
   build:
@@ -54,6 +54,9 @@ jobs:
 
       - name: Build interpreter-only arm64 core
         run: scripts/build_core.sh
+
+      - name: Fetch verified iOS user-mode networking runtime
+        run: scripts/fetch_network_runtime.sh
 
       - name: Validate build customization
         run: |
@@ -101,6 +104,9 @@ jobs:
 
       - name: Package IPA
         run: |
+          for framework in slirp.0 glib-2.0.0 iconv.2 intl.8; do
+            test -f "build/DerivedData/Build/Products/Release-iphoneos/Win95iOS.app/Frameworks/$framework.framework/$framework"
+          done
           mkdir -p build/Payload
           cp -R build/DerivedData/Build/Products/Release-iphoneos/Win95iOS.app build/Payload/
           cd build

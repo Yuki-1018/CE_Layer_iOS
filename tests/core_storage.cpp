@@ -20,7 +20,11 @@
 extern "C" bool dbp_win95_disk_ready();
 extern "C" int dbp_win95_change_cd(const char*);
 extern "C" void dbp_win95_flush_disk();
+extern "C" void dbp_win95_set_nat_active(bool);
 static std::string directory;
+static retro_netpacket_callback netpacket = {};
+static void networkSend(int, const void*, size_t, uint16_t) {}
+static void networkReceivePoll() {}
 static void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 static void be(std::vector<unsigned char>& v, size_t offset, uint64_t value, size_t bytes) {
     while (bytes) { v[offset + --bytes] = value & 255; value >>= 8; }
@@ -63,6 +67,9 @@ static bool environment(unsigned cmd, void* data) {
         return false;
     }
     if (cmd == RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE) { *static_cast<bool*>(data) = false; return true; }
+    if (cmd == RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE) {
+        netpacket = *static_cast<const retro_netpacket_callback*>(data); return true;
+    }
     return cmd == RETRO_ENVIRONMENT_SET_PIXEL_FORMAT || cmd == RETRO_ENVIRONMENT_SET_GEOMETRY || cmd == RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO;
 }
 static void video(const void*, unsigned, unsigned, size_t) {}
@@ -145,6 +152,9 @@ int main(int argc, char** argv) {
 
         retro_set_environment(environment); retro_set_video_refresh(video); retro_set_audio_sample_batch(audio);
         retro_set_input_poll(poll); retro_set_input_state(input); retro_init();
+        check(netpacket.start && netpacket.receive && netpacket.stop && netpacket.poll, "netpacket callbacks registered");
+        dbp_win95_set_nat_active(true);
+        netpacket.start(0, networkSend, networkReceivePoll);
         const std::string boot = directory + "/boot-fat.img#I*SVGA (Super Video Graphics Array)";
         retro_game_info info = {}; info.path = boot.c_str(); check(retro_load_game(&info), "load boot fixture");
         for (int i = 0; i < 300 && !dbp_win95_disk_ready(); ++i) retro_run();
@@ -184,8 +194,9 @@ int main(int argc, char** argv) {
         check(retro_unserialize(snapshot.data(), snapshot.size()), "restore with CD mounted");
         std::array<unsigned char, 2048> restoredCD;
         check(CDROM_Interface_Image::images[25]->ReadSector(restoredCD.data(), false, 20) && restoredCD[0] == 0x5A, "CD readable after suspend restore");
+        netpacket.poll(); netpacket.stop(); dbp_win95_set_nat_active(false);
         dbp_win95_flush_disk(); retro_unload_game(); retro_deinit();
-        puts("PASS: raw/VHD overlays, damaged-save recovery, repeated live CD insert/read/eject and failed replacement");
+        puts("PASS: netpacket registration, raw/VHD overlays, damaged-save recovery, repeated live CD insert/read/eject and failed replacement");
         return 0;
     } catch (const std::exception& e) { fprintf(stderr, "FAIL: %s\n", e.what()); std::_Exit(1); }
 }

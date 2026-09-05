@@ -14,6 +14,7 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - base HDD は変更せず、変更 sector のみ `win95-base-CDRIVE.sav` に保存
 - Metal による XRGB8888 framebuffer 表示
 - AVAudioEngine による 48 kHz stereo PCM 出力
+- NE2000からlibslirpへ接続するDHCP/DNS付きuser-mode NAT
 - アスペクト比を維持する全画面 Metal 表示（iPhone、iPad、AirPlay ミラーリング対応）
 - 画面内を移動できる折りたたみ式コンパクト操作メニュー
 - タッチトラックパッド、長押しドラッグ、2本指右クリック／スクロール
@@ -53,15 +54,16 @@ scripts/validate_disk.sh path/to/win95-base.img
 
 `Actions` → `Build unsigned IPA` → `Run workflow` を実行します。実行画面ではホーム画面に表示するアプリ名、bundle ID、任意のカスタムアイコンURLを指定できます。アイコンは HTTPS で取得可能な1024×1024以上のPNG/JPEGを指定してください。空欄ならアイコンを追加せずにビルドします。完了後、Artifact `Win95iOS-unsigned` から IPA を取得できます。
 
-IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOの連続交換・読み出し・メモリ使用量、交換失敗時のメディア保持、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
+IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。netpacket callbackの登録・開始・停止、FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOの連続交換・読み出し・メモリ使用量、交換失敗時のメディア保持、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
 
 続いてIPAをビルドします。
 
 1. DOSBox Pure の固定 commit `7f6e8fb7385fa446d1444d671063268520bf9b54` を取得
 2. [iOS fixed-disk patch](patches/dosbox-pure-ios-fixed-disk.patch) を適用
 3. `DISABLE_DYNAREC=1` の iOS arm64 static library を生成
-4. `CODE_SIGNING_ALLOWED=NO` で `.app` をビルド
-5. `Payload/Win95iOS.app` を unsigned IPA として zip 化
+4. SHA-256を固定したUTM 4.7.5配布物からiOS用libslirp/GLib frameworkを取得
+5. `CODE_SIGNING_ALLOWED=NO` で `.app` をビルド
+6. `Payload/Win95iOS.app` を unsigned IPA として zip 化
 
 未署名 IPA は App Store へ直接インストールできません。AltStore、SideStore、TrollStore、Apple Developer certificate を使った再署名など、端末環境に合う方法が必要です。
 
@@ -72,6 +74,7 @@ Xcode 16.4 が必要です。
 ```bash
 scripts/fetch_core.sh
 scripts/build_core.sh
+scripts/fetch_network_runtime.sh
 xcodebuild \
   -project Win95iOS.xcodeproj \
   -scheme Win95iOS \
@@ -130,6 +133,7 @@ bash scripts/test_core_storage.sh
 - 右上の `≡` をタップ: コンパクトメニューを展開／折りたたみ
 - `≡` をドラッグ: メニューを画面内の任意位置へ移動
 - キーボードアイコン: ソフトウェアキーボードを表示／非表示
+- `DOS`: `Alt+Enter` を送信してDOSプロンプトの全画面表示を切り替え。日本語版Windows 95 OSR2.1でウィンドウ表示が黒くなる場合の回避にも使用します。
 - 特殊キーバーの Win/Ctrl/Alt/Shift: 選択後に文字または特殊キーを押すと同時押しとして送信
 - `CD`: CD-ROM 管理画面を開く。保存済みイメージのタップでライブmount、`CDを取り出す` で eject、左スワイプで削除。Windowsやアプリを終了せずにATAPIメディアを交換します。
 - 保存したCD選択を次回起動時に再接続します。新しいATAPIバックエンドでのマウント中に異常終了した場合は一度だけCDなしで起動し、選択情報を保持して復旧を案内します。
@@ -143,7 +147,8 @@ bash scripts/test_core_storage.sh
 
 ## 現在の制約
 
-- DOSBox Pure が提供する NE2000 は guest から検出できますが、この専用 frontend はインターネット向け user-mode NAT をまだ接続していません。
+- NE2000はuser-mode NAT（libslirp）へ接続され、外向きTCP/UDPとDNSを利用できます。Windows 95ではNE2000互換ドライバをI/O `0x300`、IRQ `10`で設定し、TCP/IPを追加してIPアドレスを自動取得してください。割り当ては通常 `10.0.2.15/24`、ゲートウェイ `10.0.2.2`、DNS `10.0.2.3`です。NATのため外部からguestへの新規接続は受け付けません。また当時のブラウザは現在のHTTPS/TLSに対応しない場合があります。
+- 日本語・韓国語版Windows 95 OSR2系には、DOSBox PureのNormal CPU coreでウィンドウ版MS-DOSプロンプトの再描画が壊れる既知の互換性問題があります。`DOS`ボタンまたはショートカットの［プロパティ］→［画面］→［全画面表示］を使用してください。
 - Win95 の CPU 負荷は高く、古い端末では実時間速度に届かない場合があります。iOS の実行コード制限に抵触しないよう JIT は意図的に使用していません。
 - Windows の shutdown 完了時は HDD overlay を flush してからアプリが自動終了します。
 
