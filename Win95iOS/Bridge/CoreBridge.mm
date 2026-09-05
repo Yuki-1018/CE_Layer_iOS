@@ -3,6 +3,7 @@
 
 #include <libretro.h>
 #include <algorithm>
+#include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
 #include <cstdarg>
@@ -642,11 +643,18 @@ static int NetworkGetPollEvents(int index, void *opaque) {
     _networkCallbacks = *callbacks;
     struct in_addr network = {}, netmask = {}, host = {}, dhcp = {}, dns = {};
     struct in6_addr emptyIPv6 = {};
-    inet_pton(AF_INET, "10.0.2.0", &network);
-    inet_pton(AF_INET, "255.255.255.0", &netmask);
-    inet_pton(AF_INET, "10.0.2.2", &host);
-    inet_pton(AF_INET, "10.0.2.15", &dhcp);
-    inet_pton(AF_INET, "10.0.2.3", &dns);
+    const bool addressesReady =
+        inet_pton(AF_INET, "10.0.2.0", &network) == 1 &&
+        inet_pton(AF_INET, "255.255.255.0", &netmask) == 1 &&
+        inet_pton(AF_INET, "10.0.2.2", &host) == 1 &&
+        inet_pton(AF_INET, "10.0.2.15", &dhcp) == 1 &&
+        inet_pton(AF_INET, "10.0.2.3", &dns) == 1;
+    if (!addressesReady) {
+        memset(&_networkCallbacks, 0, sizeof(_networkCallbacks));
+        dbp_win95_set_nat_active(false);
+        fprintf(stderr, "[libslirp] Invalid user-mode network configuration.\n");
+        return;
+    }
 
     static const SlirpCb slirpCallbacks = {
         NetworkPacketToGuest, NetworkGuestError, NetworkClockNS,
