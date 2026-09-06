@@ -1309,8 +1309,9 @@ private final class CDLibraryViewController: UITableViewController {
                 cell.imageView?.image = UIImage(systemName: "forward.end.fill")
             case .eject:
                 cell.textLabel?.text = "CDを取り出す"
-                cell.textLabel?.textColor = .systemRed
+                cell.textLabel?.textColor = activeURL == nil ? .secondaryLabel : .systemRed
                 cell.imageView?.image = UIImage(systemName: "eject.fill")
+                cell.selectionStyle = activeURL == nil ? .none : .default
             }
             return cell
         }
@@ -1340,7 +1341,8 @@ private final class CDLibraryViewController: UITableViewController {
             switch currentActions[indexPath.row] {
             case .previous(_): onPrevious?()
             case .next(_): onNext?()
-            case .eject: onEject?()
+            case .eject:
+                if activeURL != nil { onEject?() }
             case .status: break
             }
         } else if indexPath.row == 0 {
@@ -1396,9 +1398,13 @@ private final class CDLibraryViewController: UITableViewController {
 
     private var currentActions: [CurrentAction] {
         var actions: [CurrentAction] = [.status]
-        guard let activeURL, let index = images.firstIndex(of: activeURL) else { return actions }
-        if index > 0 { actions.append(.previous(index)) }
-        if index + 1 < images.count { actions.append(.next(index + 2)) }
+        if let activeURL, let index = images.firstIndex(of: activeURL) {
+            if index > 0 { actions.append(.previous(index)) }
+            if index + 1 < images.count { actions.append(.next(index + 2)) }
+        }
+        // Keep the control in a stable location even while no media is
+        // mounted or its library URL cannot be matched after Files changes.
+        // It becomes active as soon as activeURL reports mounted media.
         actions.append(.eject)
         return actions
     }
