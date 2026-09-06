@@ -221,7 +221,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				APP_DISPLAY_NAME = "Windows 95";
+				APP_DISPLAY_NAME = "Windows 9x";
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++17";
 				CLANG_ENABLE_OBJC_ARC = YES;
 				CLANG_ENABLE_MODULES = YES;
@@ -247,6 +247,7 @@
 				SWIFT_OBJC_BRIDGING_HEADER = Win95iOS/Bridge/Win95iOS-Bridging-Header.h;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+				WIN9X_CPU_CYCLES = 77000;
 			};
 			name = Debug;
 		};
@@ -254,7 +255,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				APP_DISPLAY_NAME = "Windows 95";
+				APP_DISPLAY_NAME = "Windows 9x";
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++17";
 				CLANG_ENABLE_OBJC_ARC = YES;
 				CLANG_ENABLE_MODULES = YES;
@@ -283,6 +284,7 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;
+				WIN9X_CPU_CYCLES = 77000;
 			};
 			name = Release;
 		};

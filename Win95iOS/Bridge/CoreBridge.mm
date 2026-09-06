@@ -286,6 +286,10 @@ static int NetworkGetPollEvents(int index, void *opaque) {
         memset(&_networkCallbacks, 0, sizeof(_networkCallbacks));
         _saveDirectory = saveDirectory.fileSystemRepresentation;
         _systemDirectory = systemDirectory.fileSystemRepresentation;
+        NSString *configuredCycles = [NSBundle.mainBundle objectForInfoDictionaryKey:@"Win9xCPUCycles"];
+        NSInteger cycleCount = configuredCycles.integerValue;
+        if (cycleCount < 315 || cycleCount > 500000) cycleCount = 77000;
+        const std::string cycleOption = std::to_string(cycleCount);
         _options = {
             {"dosbox_pure_force60fps", "true"},
             {"dosbox_pure_savestate", "on"},
@@ -296,13 +300,13 @@ static int NetworkGetPollEvents(int index, void *opaque) {
             {"dosbox_pure_mouse_speed_factor", "1.0"},
             // A fixed clock avoids AUTO's large cycle swings while Win9x is
             // switching between protected mode and a virtual DOS machine.
-            // Roughly Pentium 166-class throughput, above Windows Me's setup
-            // CPU check while remaining below the 200000-cycle preset.
-            {"dosbox_pure_cycles", "100000"},
-            {"dosbox_pure_cycles_max", "100000"},
+            // The Actions guest profile selects 77000 for Windows 95 or
+            // 100000 for Windows 98/Me without enabling AUTO cycle swings.
+            {"dosbox_pure_cycles", cycleOption},
+            {"dosbox_pure_cycles_max", cycleOption},
             {"dosbox_pure_machine", "svga"},
             {"dosbox_pure_svga", "svga_s3"},
-            {"dosbox_pure_svgamem", "2"},
+            {"dosbox_pure_svgamem", "4"},
             {"dosbox_pure_voodoo", "off"},
             {"dosbox_pure_voodoo_perf", "0"},
             {"dosbox_pure_memory_size", "128"},
@@ -665,7 +669,7 @@ static int NetworkGetPollEvents(int index, void *opaque) {
     };
     _slirp = slirp_init(
         0, true, network, netmask, host,
-        false, emptyIPv6, 0, emptyIPv6, "windows95",
+        false, emptyIPv6, 0, emptyIPv6, "windows9x",
         nullptr, nullptr, nullptr, dhcp, dns, emptyIPv6,
         nullptr, nullptr, &slirpCallbacks, (__bridge void *)self
     );

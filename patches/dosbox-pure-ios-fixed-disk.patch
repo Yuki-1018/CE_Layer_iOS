@@ -307,7 +307,7 @@ index 8d8bf0b..d965b11 100644
  	
  	KBD_LAST
 diff --git a/include/regs.h b/include/regs.h
-index c07c4cb..620616f 100644
+index c07c4cb..eaab496 100644
 --- a/include/regs.h
 +++ b/include/regs.h
 @@ -54,6 +54,7 @@
@@ -327,7 +327,7 @@ index c07c4cb..620616f 100644
  };
  
  union GenReg32 {
-@@ -97,6 +100,14 @@ static INLINE PhysPt SegPhys(SegNames index) {
+@@ -97,6 +100,19 @@ static INLINE PhysPt SegPhys(SegNames index) {
  	return Segs.phys[index];
  }
  
@@ -339,9 +339,29 @@ index c07c4cb..620616f 100644
 +	return Segs.expanddown[index] ? offset > SegLimit(index) : offset <= SegLimit(index);
 +}
 +
++static INLINE bool SegTriggersWin95VDMProbe(SegNames index, PhysPt offset) {
++	return !Segs.expanddown[index] && SegLimit(index) == 0 &&
++	       !SegAccessWithinLimit(index, offset);
++}
++
  static INLINE Bit16u SegValue(SegNames index) {
  	return (Bit16u)Segs.val[index];
  }
+@@ -111,6 +127,14 @@ static INLINE void SegSet16(Bitu index,Bit16u val) {
+ 	Segs.phys[index]=val << 4;
+ }
+ 
++static INLINE void SegSetV86(Bitu index, Bit16u val) {
++	SegSet16(index, val);
++	// Loading a segment in virtual-8086 mode creates a 64 KiB, expand-up
++	// cache entry. Keeping a protected-mode zero limit here causes a #GP loop.
++	Segs.limit[index]=0xffff;
++	Segs.expanddown[index]=false;
++}
++
+ enum {
+ 	REGI_AX, REGI_CX, REGI_DX, REGI_BX,
+ 	REGI_SP, REGI_BP, REGI_SI, REGI_DI
 diff --git a/src/cpu/core_normal.cpp b/src/cpu/core_normal.cpp
 index 037b550..7cc44ab 100644
 --- a/src/cpu/core_normal.cpp
@@ -359,10 +379,10 @@ index 037b550..7cc44ab 100644
  		SAVEIP;
  	}
 diff --git a/src/cpu/core_normal/table_ea.h b/src/cpu/core_normal/table_ea.h
-index 18e256a..b2e49a3 100644
+index 18e256a..878c1a7 100644
 --- a/src/cpu/core_normal/table_ea.h
 +++ b/src/cpu/core_normal/table_ea.h
-@@ -174,12 +174,10 @@ static GetEAHandler EATable[512]={
+@@ -174,12 +174,13 @@ static GetEAHandler EATable[512]={
  	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0
  };
  
@@ -379,7 +399,10 @@ index 18e256a..b2e49a3 100644
 +	PhysPt eaa;                                            \
 +	if (TEST_PREFIX_ADDR) eaa=Fetchd();                    \
 +	else eaa=Fetchw();                                     \
-+	if (!SegAccessWithinLimit(core.base_val_ds, eaa))      \
++	/* Win95 OSR2 probes a zero-limit segment to enter its VDM.  Limit */ \
++	/* checking every EA is incomplete in this DOSBox branch and breaks */ \
++	/* some localized Win9x boot paths, so reproduce only that probe.  */ \
++	if (SegTriggersWin95VDMProbe(core.base_val_ds, eaa))   \
 +		goto gp_fault;                                       \
 +	eaa += BaseDS;
 diff --git a/src/cpu/core_prefetch.cpp b/src/cpu/core_prefetch.cpp
@@ -417,9 +440,18 @@ index 653b3c6..9464fea 100644
  		SAVEIP;
  	}
 diff --git a/src/cpu/cpu.cpp b/src/cpu/cpu.cpp
-index d28878b..4ceef7e 100644
+index d28878b..6f206da 100644
 --- a/src/cpu/cpu.cpp
 +++ b/src/cpu/cpu.cpp
+@@ -480,7 +480,7 @@ bool CPU_SwitchTask(Bitu new_tss_selector,TSwitchType tstype,Bitu old_eip) {
+ 	}
+ 	/* Load the new selectors */
+ 	if (reg_flags & FLAG_VM) {
+-		SegSet16(cs,new_cs);
++		SegSetV86(cs,new_cs);
+ 		cpu.code.big=false;
+ 		CPU_SetCPL(3);			//We don't have segment caches so this will do
+ 	} else {
 @@ -502,6 +502,8 @@ bool CPU_SwitchTask(Bitu new_tss_selector,TSwitchType tstype,Bitu old_eip) {
  		case DESC_CODE_R_C_A:		case DESC_CODE_R_C_NA:
  			if (cpu.cpl < cs_desc.DPL()) E_Exit("Task CS RPL < DPL");
@@ -447,6 +479,33 @@ index d28878b..4ceef7e 100644
  				cpu.code.big=cs_desc.Big()>0;
  				reg_eip=gate_off;
  
+@@ -809,7 +815,7 @@ void CPU_IRET(bool use32,Bitu oldeip) {
+ 					reg_esp=(tempesp&cpu.stack.notmask)|((tempesp+4)&cpu.stack.mask);
+ 
+ 					reg_eip=new_eip;
+-					SegSet16(cs,(Bit16u)(new_cs&0xffff));
++					SegSetV86(cs,(Bit16u)(new_cs&0xffff));
+ 					/* IOPL can not be modified in v86 mode by IRET */
+ 					CPU_SetFlags(new_flags,FMASK_NORMAL|FLAG_NT);
+ 				} else {
+@@ -821,7 +827,7 @@ void CPU_IRET(bool use32,Bitu oldeip) {
+ 					reg_esp=(tempesp&cpu.stack.notmask)|((tempesp+2)&cpu.stack.mask);
+ 
+ 					reg_eip=(Bit32u)new_eip;
+-					SegSet16(cs,new_cs);
++					SegSetV86(cs,new_cs);
+ 					/* IOPL can not be modified in v86 mode by IRET */
+ 					CPU_SetFlags(new_flags,FMASK_NORMAL|FLAG_NT);
+ 				}
+@@ -878,7 +884,7 @@ void CPU_IRET(bool use32,Bitu oldeip) {
+ 				CPU_SetSegGeneral(gs,n_gs);
+ 				reg_esp=n_esp;
+ 				cpu.code.big=false;
+-				SegSet16(cs,n_cs_sel);
++				SegSetV86(cs,n_cs_sel);
+ 				LOG(LOG_CPU,LOG_NORMAL)("IRET:Back to V86: CS:%X IP %X SS:%X SP %X FLAGS:%X",SegValue(cs),reg_eip,SegValue(ss),reg_esp,reg_flags);	
+ 				return;
+ 				//PAGE_FAULT_CLEANUP_CATCH(reg_esp = orig_esp;)
 @@ -932,6 +938,8 @@ void CPU_IRET(bool use32,Bitu oldeip) {
  
  			// commit point
@@ -474,7 +533,17 @@ index d28878b..4ceef7e 100644
  			if (n_ss_desc.Big()) {
  				cpu.stack.big=true;
  				cpu.stack.mask=0xffffffff;
-@@ -1062,6 +1074,8 @@ CODE_jmp:
+@@ -1025,7 +1037,8 @@ void CPU_JMP(bool use32,Bitu selector,Bitu offset,Bitu oldeip) {
+ 		} else {
+ 			reg_eip=offset;
+ 		}
+-		SegSet16(cs,selector);
++		if (reg_flags & FLAG_VM) SegSetV86(cs,selector);
++		else SegSet16(cs,selector);
+ 		cpu.code.big=false;
+ 		return;
+ 	} else {
+@@ -1062,6 +1075,8 @@ CODE_jmp:
  			}
  
  			/* Normal jump to another selector:offset */
@@ -483,7 +552,7 @@ index d28878b..4ceef7e 100644
  			Segs.phys[cs]=desc.GetBase();
  			cpu.code.big=desc.Big()>0;
  			Segs.val[cs]=(selector & 0xfffc) | cpu.cpl;
-@@ -1133,6 +1147,8 @@ CODE_jmp:
+@@ -1133,6 +1148,8 @@ CODE_jmp:
  					// zrdx extender
  
  					/* Switch to new CS:EIP */
@@ -492,7 +561,17 @@ index d28878b..4ceef7e 100644
  					Segs.phys[cs]	= n_cs_desc.GetBase();
  					Segs.val[cs]	= (uint16_t)((n_cs_sel & 0xfffc) | cpu.cpl);
  					cpu.code.big	= n_cs_desc.Big()>0;
-@@ -1215,6 +1231,8 @@ call_code:
+@@ -1168,7 +1185,8 @@ void CPU_CALL(bool use32,Bitu selector,Bitu offset,Bitu oldeip) {
+ 		}
+ 		//PAGE_FAULT_CLEANUP_CATCH(reg_esp = old_esp; reg_eip = old_eip;)
+ 		cpu.code.big=false;
+-		SegSet16(cs,selector);
++		if (reg_flags & FLAG_VM) SegSetV86(cs,selector);
++		else SegSet16(cs,selector);
+ 		return;
+ 	} else {
+ 		CPU_CHECK_COND((selector & 0xfffc)==0,
+@@ -1215,6 +1233,8 @@ call_code:
  				reg_eip=offset;
  			}
  			//PAGE_FAULT_CLEANUP_CATCH(reg_esp = old_esp; reg_eip = old_eip;)
@@ -501,7 +580,7 @@ index d28878b..4ceef7e 100644
  			Segs.phys[cs]=call.GetBase();
  			cpu.code.big=call.Big()>0;
  			Segs.val[cs]=(selector & 0xfffc) | cpu.cpl;
-@@ -1316,6 +1334,8 @@ call_code:
+@@ -1316,6 +1336,8 @@ call_code:
  						// commit point
  						Segs.val[ss]=n_ss_sel;
  						Segs.phys[ss]=n_ss_desc.GetBase();
@@ -510,7 +589,7 @@ index d28878b..4ceef7e 100644
  						if (n_ss_desc.Big()) {
  							cpu.stack.big=true;
  							cpu.stack.mask=0xffffffff;
-@@ -1331,6 +1351,8 @@ call_code:
+@@ -1331,6 +1353,8 @@ call_code:
  						CPU_SetCPL(n_cs_desc.DPL());
  						Bit16u oldcs    = SegValue(cs);
  						/* Switch to new CS:EIP */
@@ -519,7 +598,7 @@ index d28878b..4ceef7e 100644
  						Segs.phys[cs]	= n_cs_desc.GetBase();
  						Segs.val[cs]	= (n_cs_sel & 0xfffc) | cpu.cpl;
  						cpu.code.big	= n_cs_desc.Big()>0;
-@@ -1373,6 +1395,8 @@ call_code:
+@@ -1373,6 +1397,8 @@ call_code:
  					//PAGE_FAULT_CLEANUP_CATCH(reg_esp = old_esp; reg_eip = old_eip;)
  
  					/* Switch to new CS:EIP */
@@ -528,7 +607,17 @@ index d28878b..4ceef7e 100644
  					Segs.phys[cs]	= n_cs_desc.GetBase();
  					Segs.val[cs]	= (n_cs_sel & 0xfffc) | cpu.cpl;
  					cpu.code.big	= n_cs_desc.Big()>0;
-@@ -1489,6 +1513,8 @@ RET_same_level:
+@@ -1424,7 +1450,8 @@ void CPU_RET(bool use32,Bitu bytes,Bitu oldeip) {
+ 			new_cs=CPU_Pop32() & 0xffff;
+ 		}
+ 		reg_esp+=bytes;
+-		SegSet16(cs,new_cs);
++		if (reg_flags & FLAG_VM) SegSetV86(cs,new_cs);
++		else SegSet16(cs,new_cs);
+ 		reg_eip=new_ip;
+ 		cpu.code.big=false;
+ 		return;
+@@ -1489,6 +1516,8 @@ RET_same_level:
  			}
  			//PAGE_FAULT_CLEANUP_CATCH(reg_esp = orig_esp;)
  
@@ -537,7 +626,7 @@ index d28878b..4ceef7e 100644
  			Segs.phys[cs]=desc.GetBase();
  			cpu.code.big=desc.Big()>0;
  			Segs.val[cs]=selector;
-@@ -1569,6 +1595,8 @@ RET_same_level:
+@@ -1569,6 +1598,8 @@ RET_same_level:
  				EXCEPTION_SS,n_ss & 0xfffc)
  
  			CPU_SetCPL(rpl);
@@ -546,7 +635,7 @@ index d28878b..4ceef7e 100644
  			Segs.phys[cs]=desc.GetBase();
  			cpu.code.big=desc.Big()>0;
  			Segs.val[cs]=(selector&0xfffc) | cpu.cpl;
-@@ -1576,6 +1604,8 @@ RET_same_level:
+@@ -1576,6 +1607,8 @@ RET_same_level:
  
  			Segs.val[ss]=n_ss;
  			Segs.phys[ss]=n_ss_desc.GetBase();
@@ -555,7 +644,18 @@ index d28878b..4ceef7e 100644
  			if (n_ss_desc.Big()) {
  				cpu.stack.big=true;
  				cpu.stack.mask=0xffffffff;
-@@ -2065,6 +2095,8 @@ bool CPU_SetSegGeneral(SegNames seg,Bitu value) {
+@@ -2026,6 +2059,10 @@ bool CPU_SetSegGeneral(SegNames seg,Bitu value) {
+ 	if (!cpu.pmode || (reg_flags & FLAG_VM)) {
+ 		Segs.val[seg]=value;
+ 		Segs.phys[seg]=value << 4;
++		if (reg_flags & FLAG_VM) {
++			Segs.limit[seg]=0xffff;
++			Segs.expanddown[seg]=false;
++		}
+ 		if (seg==ss) {
+ 			cpu.stack.big=false;
+ 			cpu.stack.mask=0xffff;
+@@ -2065,6 +2102,8 @@ bool CPU_SetSegGeneral(SegNames seg,Bitu value) {
  
  			Segs.val[seg]=value;
  			Segs.phys[seg]=desc.GetBase();
@@ -564,7 +664,7 @@ index d28878b..4ceef7e 100644
  			if (desc.Big()) {
  				cpu.stack.big=true;
  				cpu.stack.mask=0xffffffff;
-@@ -2109,6 +2141,8 @@ bool CPU_SetSegGeneral(SegNames seg,Bitu value) {
+@@ -2109,6 +2148,8 @@ bool CPU_SetSegGeneral(SegNames seg,Bitu value) {
  
  			Segs.val[seg]=value;
  			Segs.phys[seg]=desc.GetBase();
@@ -573,7 +673,7 @@ index d28878b..4ceef7e 100644
  		}
  
  		return false;
-@@ -2474,12 +2508,12 @@ public:
+@@ -2474,12 +2515,12 @@ public:
  		reg_ebp=0;
  		reg_esp=0;
  	

@@ -1,14 +1,14 @@
-# CE_Layer_iOS — Windows 95 fixed machine for iPhone / iPad
+# CE_Layer_iOS — Windows 9x fixed machine for iPhone / iPad
 
-Windows 95 を「互換レイヤー」ではなく、x86 PC として iOS 上で動かす専用アプリです。汎用 VM 作成画面は持たず、Pentium / 128 MB RAM / S3 SVGA / Sound Blaster 16 / IDE という固定構成で、ユーザー所有のセットアップ済み Windows 95 HDD を直接起動します。
+Windows 95・Windows 98 First Edition/Second Edition・Windows Meを「互換レイヤー」ではなく、x86 PCとしてiOS上で動かす専用アプリです。汎用VM作成画面は持たず、Pentium / 128 MB RAM / S3 SVGA / Sound Blaster 16 / IDEという固定構成で、ユーザー所有のセットアップ済みWindows 9x HDDを直接起動します。
 
 GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリタ版コアをビルドし、コード署名なしの `Win95iOS-unsigned.ipa` を Artifact に出力します。
 
 ## 実装済み
 
 - DOSBox Pure の x86 interpreter を固定コミットからビルド（JIT/dynarec 無効）
-- Pentium (`pentium_slow`)、128 MB、100000 fixed cycles（Pentium 166相当を目安）、S3 Trio64、SB16 の固定オプション（Windows MeセットアップのCPU判定とV86切替を考慮し、cyclesの自動変動は使いません。このコアではMMX無効のため `pentium_mmx` は使用しません）
-- Windows 95 OSR2のウィンドウDOSとWindows Meセットアップ向けに、CPUセグメント境界キャッシュと正しいGeneral Protection例外をNormal interpreterへ移植
+- Pentium (`pentium_slow`)、128 MB、4 MB S3 Trio64、SB16の固定構成。Windows 95は77000、Windows 98/Meは100000 fixed cyclesを使用
+- Windows 95 OSR2のウィンドウDOSとWindows 98/Meセットアップ向けに、ゼロ長セグメントのGeneral Protection例外とVM86セグメントキャッシュ初期化をNormal interpreterへ移植
 - raw `.img` / `.vhd` の BIOS 自動起動（DOSBox Pure のスタートメニューを表示しない）
 - 初回起動時やベースイメージ未配置時に表示する、iPhone横向きにも対応したイメージ選択画面
 - 512-byte sector 単位の永続 differencing disk
@@ -27,18 +27,19 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - background 移行時と正常終了時の HDD overlay flush
 - iPhone / iPad 共通 UI
 
-## Windows 95 イメージについて
+## Windows 9xイメージについて
 
-Windows 95 は Microsoft の著作物であり、このリポジトリには含まれません。自分が正当に所有する、セットアップ済みの raw HDD image を使用してください。
+Windows 95/98/MeはMicrosoftの著作物であり、このリポジトリには含まれません。自分が正当に所有する、セットアップ済みのraw HDD imageを使用してください。
 
 選択肢は2つです。
 
 1. 初回起動時に表示されるセットアップ画面から `.img` または `.vhd` を Files picker で選ぶ（推奨）。イメージは「このiPhone/iPad内」→アプリ名→`Win95` へコピーされます。後からベースイメージを削除した場合も、次回起動時に同じ画面へ戻ります。
-2. 自分専用の private fork / local checkout で `Win95iOS/BundledContent/win95-base.img` を置いてからビルドする。`.gitignore` 対象なので、誤って公開しないよう注意してください。
+2. GitHub Actionsの `hdd_image_url` へHTTPSダウンロードURLを指定し、IPAへ直接同梱する。raw IMGとVHDに対応し、`hdd_image_sha256` の指定を推奨します。
+3. 自分専用のprivate fork / local checkoutで `Win95iOS/BundledContent/win95-base.img` または `.vhd` を置いてからビルドする。`.gitignore` 対象なので、誤って公開しないよう注意してください。
 
 推奨 guest 設定:
 
-- Windows 95 OSR2
+- Windows 95 OSR2.1、Windows 98 First Edition/Second Edition、またはWindows Me
 - FAT16/FAT32 の raw IDE HDD（512-byte sector）
 - Standard 101/102-Key keyboard
 - S3 Trio64 display driver
@@ -53,7 +54,16 @@ scripts/validate_disk.sh path/to/win95-base.img
 
 ## GitHub Actions
 
-`Actions` → `Build unsigned IPA` → `Run workflow` を実行します。実行画面ではホーム画面に表示するアプリ名、bundle ID、任意のカスタムアイコンURLを指定できます。アイコンは HTTPS で取得可能な1024×1024以上のPNG/JPEGを指定してください。空欄ならアイコンを追加せずにビルドします。完了後、Artifact `Win95iOS-unsigned` から IPA を取得できます。
+`Actions` → `Build unsigned IPA` → `Run workflow` を実行します。実行画面ではアプリ名、bundle ID、カスタムアイコンURLに加えて次を指定できます。
+
+- `guest_profile`: `windows95`（77000 cycles）/ `windows98` / `windowsme`（後者2つは100000 cycles）
+- `hdd_image_url`: 任意。正当に所有するセットアップ済み・未圧縮IMG/VHDファイルへの直接HTTPS URL。最大4 GiB
+- `hdd_image_format`: `auto` / `img` / `vhd`。`auto`はVHD footerを検出し、それ以外をraw IMGとして扱います
+- `hdd_image_sha256`: 任意ですが指定推奨。ダウンロード破損や別ファイルへの差し替わりを検出します
+
+HDD URLを空欄にすれば従来どおり初回起動時にFiles pickerが表示されます。同梱したベースHDD自体は変更されず、ゲストによる書き込みはDocuments内の差分保存データへ記録されます。完了後、Artifact `Win95iOS-unsigned` からIPAを取得できます。
+
+同梱HDDはFiles pickerで以前取り込んだHDDより優先して起動します。ベースHDDのサイズと5地点の64 KiBサンプルから識別子を作り、別のWindowsイメージへ変わった場合は旧 `.sav` と一時停止状態を新しいHDDへ適用しません。旧データは `Saves/` 内の `.previous-base-image-*` または初回移行時の `.unverified-base-image-*` へ退避され、削除されません。
 
 IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。音声のプリバッファ・アンダーラン復帰、Normal CPU interpreterとセグメント境界キャッシュ、netpacket callbackの登録・開始・停止、FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOと内容の異なる複数ディスクの連続交換・読み出し・メモリ使用量、交換失敗時のメディア保持、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
 
@@ -150,7 +160,7 @@ bash scripts/test_core_storage.sh
 ## 現在の制約
 
 - NE2000はuser-mode NAT（libslirp）へ接続され、外向きTCP/UDPとDNSを利用できます。Windows 95ではNE2000互換ドライバをI/O `0x300`、IRQ `10`で設定し、TCP/IPを追加してIPアドレスを自動取得してください。割り当ては通常 `10.0.2.15/24`、ゲートウェイ `10.0.2.2`、DNS `10.0.2.3`です。NATのため外部からguestへの新規接続は受け付けません。また当時のブラウザは現在のHTTPS/TLSに対応しない場合があります。
-- 日本語・韓国語版Windows 95 OSR2系がウィンドウ版MS-DOSプロンプトを開始するときに利用する、ゼロ長コードセグメントへのアクセスとGeneral Protection例外をNormal CPU interpreterで再現します。CPUクロックもAUTOではなく固定し、V86切替中の急激なサイクル変動を防ぎます。旧一時停止状態は自動退避されるため、更新直後は通常起動になります。
+- 日本語・韓国語版Windows 95 OSR2系がウィンドウ版MS-DOSプロンプトを開始するときに利用する、ゼロ長コードセグメントへのアクセスとGeneral Protection例外をNormal CPU interpreterで再現します。VM86移行時には全セグメントの隠しlimitを64 KiBへ戻し、日本語版の起動中に古いprotected-mode limitで例外ループへ入ることを防ぎます。旧一時停止状態は自動退避されるため、更新直後は通常起動になります。
 - Win95 の CPU 負荷は高く、古い端末では実時間速度に届かない場合があります。iOS の実行コード制限に抵触しないよう JIT は意図的に使用していません。
 - Windows の shutdown 完了時は HDD overlay を flush してからアプリが自動終了します。
 

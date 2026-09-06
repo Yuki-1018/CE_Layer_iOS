@@ -20,6 +20,8 @@
     <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>Win9xCPUCycles</key>
+    <string>$(WIN9X_CPU_CYCLES)</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>UIApplicationSupportsIndirectInputEvents</key>
@@ -38,7 +40,7 @@
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Windows 95からローカルネットワーク上のサーバーへ接続するために使用します。</string>
+    <string>Windows 9xからローカルネットワーク上のサーバーへ接続するために使用します。</string>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationLandscapeLeft</string>

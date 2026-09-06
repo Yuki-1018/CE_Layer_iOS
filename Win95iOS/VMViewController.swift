@@ -1,4 +1,5 @@
 import AVFoundation
+import CryptoKit
 import Darwin
 import GameController
 import UniformTypeIdentifiers
@@ -50,7 +51,10 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private let cdMountInProgressKey = "CDMountInProgress"
     private let cdMountStateVersionKey = "CDMountStateVersion"
     private let suspendCompatibilityKey = "SuspendStorageBackendVersion"
-    private let suspendCompatibilityVersion = 5
+    private let suspendCompatibilityVersion = 6
+    private let baseDiskIdentityKey = "BaseDiskSampleIdentity"
+    private let baseDiskIdentityVersionKey = "BaseDiskSampleIdentityVersion"
+    private let baseDiskIdentityVersion = 1
     private var recoveredFromInterruptedCDMount = false
     private var importedDiskURL: URL? {
         for ext in ["img", "vhd"] {
@@ -225,8 +229,13 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     private func startBundledOrImportedDisk() {
         let initialCD = recoverablePersistedCDURL
+        for ext in ["img", "vhd"] {
+            if let bundled = Bundle.main.url(forResource: "win95-base", withExtension: ext, subdirectory: "BundledContent") {
+                startVM(disk: bundled, CD: initialCD)
+                return
+            }
+        }
         if let importedDiskURL { startVM(disk: importedDiskURL, CD: initialCD); return }
-        if let bundled = Bundle.main.url(forResource: "win95-base", withExtension: "img", subdirectory: "BundledContent") { startVM(disk: bundled, CD: initialCD); return }
         showMissingDisk()
     }
 
@@ -249,6 +258,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private func startVM(disk: URL, CD: URL?, restoreSuspendState: Bool = true) {
         do {
             try preserveIncompatibleSuspendState()
+            try prepareStorageForBaseDisk(disk)
             if CD == nil, UserDefaults.standard.string(forKey: selectedCDKey) != nil {
                 try archiveSuspendState(reason: "media-unavailable")
             }
@@ -301,10 +311,53 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private func preserveIncompatibleSuspendState() throws {
         let defaults = UserDefaults.standard
         guard defaults.integer(forKey: suspendCompatibilityKey) < suspendCompatibilityVersion else { return }
-        // Segment-limit caches changed the serialized CPU layout. Preserve the
-        // old state, but do not feed it to the corrected Win9x interpreter.
+        // Preserve states created before the corrected VM86 segment-cache
+        // initialization; resuming one can return directly to its old #GP loop.
         try archiveSuspendState(reason: "previous-cpu-segment-cache")
         defaults.set(suspendCompatibilityVersion, forKey: suspendCompatibilityKey)
+    }
+
+    private func prepareStorageForBaseDisk(_ disk: URL) throws {
+        let identity = try sampledIdentity(of: disk)
+        let defaults = UserDefaults.standard
+        let previousIdentity = defaults.string(forKey: baseDiskIdentityKey)
+        let identityIsKnown = defaults.integer(forKey: baseDiskIdentityVersionKey) >= baseDiskIdentityVersion
+        let save = savesDirectory.appendingPathComponent("win95-base-CDRIVE.sav")
+
+        if !identityIsKnown || previousIdentity != identity {
+            let reason = identityIsKnown ? "previous-base-image" : "unverified-base-image"
+            if FileManager.default.fileExists(atPath: save.path) {
+                let backup = savesDirectory.appendingPathComponent(
+                    "win95-base-CDRIVE.\(reason)-\(UUID().uuidString).sav"
+                )
+                try FileManager.default.moveItem(at: save, to: backup)
+            }
+            try archiveSuspendState(reason: reason)
+        }
+
+        defaults.set(identity, forKey: baseDiskIdentityKey)
+        defaults.set(baseDiskIdentityVersion, forKey: baseDiskIdentityVersionKey)
+    }
+
+    private func sampledIdentity(of disk: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: disk)
+        defer { try? handle.close() }
+        let attributes = try FileManager.default.attributesOfItem(atPath: disk.path)
+        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        var littleEndianSize = size.littleEndian
+        var hasher = SHA256()
+        withUnsafeBytes(of: &littleEndianSize) { hasher.update(data: Data($0)) }
+
+        let sampleSize = UInt64(64 * 1024)
+        let lastOffset = size > sampleSize ? size - sampleSize : 0
+        let offsets = Set([UInt64(0), size / 4, size / 2, (size / 4) * 3, lastOffset]).sorted()
+        for offset in offsets {
+            var littleEndianOffset = offset.littleEndian
+            withUnsafeBytes(of: &littleEndianOffset) { hasher.update(data: Data($0)) }
+            try handle.seek(toOffset: offset)
+            hasher.update(data: try handle.read(upToCount: Int(sampleSize)) ?? Data())
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private func archiveSuspendState(reason: String) throws {
@@ -380,19 +433,11 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 guard size >= 10 * 1024 * 1024, size % 512 == 0 else {
                     throw NSError(domain: "Win95UI", code: 2, userInfo: [NSLocalizedDescriptionKey: "ディスクイメージは10 MB以上で、ファイルサイズが512バイトの倍数である必要があります。"])
                 }
-                for oldExtension in ["img", "vhd"] {
-                    let oldURL = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(oldExtension)
-                    if FileManager.default.fileExists(atPath: oldURL.path) { try FileManager.default.removeItem(at: oldURL) }
-                }
-                let destination = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(ext)
-                try FileManager.default.copyItem(at: source, to: destination)
-                try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: destination.path)
-                discardAutomaticSuspendState()
                 if bridge.isRunning {
                     audio.stop()
-                    bridge.stop { [weak self] in self?.startVM(disk: destination, CD: nil, restoreSuspendState: false) }
+                    bridge.stop { [weak self] in self?.replaceBaseDisk(from: source, fileExtension: ext) }
                 } else {
-                    startVM(disk: destination, CD: nil, restoreSuspendState: false)
+                    replaceBaseDisk(from: source, fileExtension: ext)
                 }
             } catch {
                 diskSetupView.setBusy(false)
@@ -400,6 +445,24 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             }
         case .cd:
             importCDImages(urls)
+        }
+    }
+
+    private func replaceBaseDisk(from source: URL, fileExtension ext: String) {
+        do {
+            for oldExtension in ["img", "vhd"] {
+                let oldURL = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(oldExtension)
+                if FileManager.default.fileExists(atPath: oldURL.path) {
+                    try FileManager.default.removeItem(at: oldURL)
+                }
+            }
+            let destination = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(ext)
+            try FileManager.default.copyItem(at: source, to: destination)
+            try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: destination.path)
+            startVM(disk: destination, CD: nil, restoreSuspendState: false)
+        } catch {
+            diskSetupView.setBusy(false)
+            showError(error)
         }
     }
 
@@ -962,7 +1025,7 @@ private final class DiskSetupView: UIView {
         symbol.contentMode = .scaleAspectFit
 
         let titleLabel = UILabel()
-        titleLabel.text = "Windows 95 イメージを選択"
+        titleLabel.text = "Windows 9x イメージを選択"
         titleLabel.textColor = .white
         titleLabel.font = .systemFont(ofSize: 27, weight: .bold)
         titleLabel.adjustsFontForContentSizeCategory = true
@@ -970,7 +1033,7 @@ private final class DiskSetupView: UIView {
         titleLabel.numberOfLines = 0
 
         let descriptionLabel = UILabel()
-        descriptionLabel.text = "セットアップ済みの Windows 95 が入ったディスクイメージを選択してください。"
+        descriptionLabel.text = "セットアップ済みの Windows 95 / 98 / Me が入ったディスクイメージを選択してください。"
         descriptionLabel.textColor = UIColor.white.withAlphaComponent(0.82)
         descriptionLabel.font = .systemFont(ofSize: 16, weight: .regular)
         descriptionLabel.adjustsFontForContentSizeCategory = true
@@ -996,7 +1059,7 @@ private final class DiskSetupView: UIView {
         selectButton.configuration = buttonConfiguration
         selectButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
         selectButton.addTarget(self, action: #selector(selectImage), for: .touchUpInside)
-        selectButton.accessibilityLabel = "Windows 95 ディスクイメージを選択"
+        selectButton.accessibilityLabel = "Windows 9x ディスクイメージを選択"
 
         let storageLabel = UILabel()
         storageLabel.text = "選択したイメージはアプリ内へコピーされます。Windowsによる変更内容は別の保存データへ記録されるため、ベースイメージは変更されません。"

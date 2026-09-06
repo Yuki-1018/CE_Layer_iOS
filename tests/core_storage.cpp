@@ -194,8 +194,16 @@ int main(int argc, char** argv) {
         const bool savedDSExpandDown = Segs.expanddown[ds];
         Segs.limit[ds] = 0;
         Segs.expanddown[ds] = false;
-        check(!SegAccessWithinLimit(ds, 1),
+        check(SegTriggersWin95VDMProbe(ds, 1),
               "Win95 zero-length segment access raises general protection");
+        Segs.limit[ds] = 0x10;
+        check(!SegTriggersWin95VDMProbe(ds, 0x11),
+              "localized Win9x boot is not exposed to partial general limit checks");
+        Segs.limit[ds] = 0;
+        Segs.expanddown[ds] = true;
+        SegSetV86(ds, 0x1234);
+        check(SegLimit(ds) == 0xffff && !Segs.expanddown[ds],
+              "virtual-8086 segment load resets hidden limit cache");
         Segs.limit[ds] = savedDSLimit;
         Segs.expanddown[ds] = savedDSExpandDown;
         check(!strcmp(DBP_CPU_GetDecoderName(), "Normal"),
