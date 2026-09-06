@@ -325,6 +325,8 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         let save = savesDirectory.appendingPathComponent("win95-base-CDRIVE.sav")
 
         if !identityIsKnown || previousIdentity != identity {
+            let bundledSave = bundledSaveURL(for: disk)
+            if let bundledSave { try validateDiskSave(at: bundledSave) }
             let reason = identityIsKnown ? "previous-base-image" : "unverified-base-image"
             if FileManager.default.fileExists(atPath: save.path) {
                 let backup = savesDirectory.appendingPathComponent(
@@ -333,10 +335,51 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 try FileManager.default.moveItem(at: save, to: backup)
             }
             try archiveSuspendState(reason: reason)
+            if let bundledSave { try installBundledSave(from: bundledSave, to: save) }
         }
 
         defaults.set(identity, forKey: baseDiskIdentityKey)
         defaults.set(baseDiskIdentityVersion, forKey: baseDiskIdentityVersionKey)
+    }
+
+    private func bundledSaveURL(for disk: URL) -> URL? {
+        let selectedDisk = disk.standardizedFileURL.resolvingSymlinksInPath()
+        let usesBundledDisk = ["img", "vhd"].contains { ext in
+            guard let bundledDisk = Bundle.main.url(
+                forResource: "win95-base",
+                withExtension: ext,
+                subdirectory: "BundledContent"
+            ) else { return false }
+            return bundledDisk.standardizedFileURL.resolvingSymlinksInPath() == selectedDisk
+        }
+        guard usesBundledDisk else { return nil }
+        return Bundle.main.url(
+            forResource: "win95-base-CDRIVE",
+            withExtension: "sav",
+            subdirectory: "BundledContent"
+        )
+    }
+
+    private func validateDiskSave(at url: URL) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let header = try handle.read(upToCount: 5)
+        guard header == Data([70, 70, 68, 68, 1]), size >= 5, (size - 5) % 516 == 0 else {
+            throw NSError(
+                domain: "Win95UI",
+                code: 9,
+                userInfo: [NSLocalizedDescriptionKey: "同梱された win95-base-CDRIVE.sav は有効なFFDD v1差分ディスクではありません。ビルド設定のHDDと保存データを確認してください。"]
+            )
+        }
+    }
+
+    private func installBundledSave(from source: URL, to destination: URL) throws {
+        let temporary = savesDirectory.appendingPathComponent("bundled-save-\(UUID().uuidString).partial")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        try FileManager.default.copyItem(at: source, to: temporary)
+        try FileManager.default.moveItem(at: temporary, to: destination)
     }
 
     private func sampledIdentity(of disk: URL) throws -> String {

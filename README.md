@@ -34,8 +34,8 @@ Windows 95/98/MeはMicrosoftの著作物であり、このリポジトリには�
 選択肢は2つです。
 
 1. 初回起動時に表示されるセットアップ画面から `.img` または `.vhd` を Files picker で選ぶ（推奨）。イメージは「このiPhone/iPad内」→アプリ名→`Win95` へコピーされます。後からベースイメージを削除した場合も、次回起動時に同じ画面へ戻ります。
-2. GitHub Actionsの `hdd_image_url` へHTTPSダウンロードURLを指定し、IPAへ直接同梱する。raw IMGとVHDに対応し、`hdd_image_sha256` の指定を推奨します。
-3. 自分専用のprivate fork / local checkoutで `Win95iOS/BundledContent/win95-base.img` または `.vhd` を置いてからビルドする。`.gitignore` 対象なので、誤って公開しないよう注意してください。
+2. GitHub Actionsの `hdd_image_url` へHTTPSダウンロードURLを指定し、IPAへ直接同梱する。raw IMGとVHDに対応し、`hdd_image_sha256` の指定を推奨します。対応する差分ディスクも同梱する場合は `hdd_save_url` に `win95-base-CDRIVE.sav` のURLを指定します。
+3. 自分専用のprivate fork / local checkoutで `Win95iOS/BundledContent/win95-base.img` または `.vhd` を置いてからビルドする。差分ディスクも仕込む場合は同じ場所へ `win95-base-CDRIVE.sav` という名前で置きます。これらは `.gitignore` 対象なので、誤って公開しないよう注意してください。
 
 推奨 guest 設定:
 
@@ -60,8 +60,10 @@ scripts/validate_disk.sh path/to/win95-base.img
 - `hdd_image_url`: 任意。正当に所有するセットアップ済み・未圧縮IMG/VHDファイルへの直接HTTPS URL。最大4 GiB
 - `hdd_image_format`: `auto` / `img` / `vhd`。`auto`はVHD footerを検出し、それ以外をraw IMGとして扱います
 - `hdd_image_sha256`: 任意ですが指定推奨。ダウンロード破損や別ファイルへの差し替わりを検出します
+- `hdd_save_url`: 任意。`hdd_image_url` のHDDと対になるFFDD v1 `.sav` への直接HTTPS URL。単独では指定できません
+- `hdd_save_sha256`: 任意ですが指定推奨。`.sav` のダウンロード破損や差し替わりを検出します
 
-HDD URLを空欄にすれば従来どおり初回起動時にFiles pickerが表示されます。同梱したベースHDD自体は変更されず、ゲストによる書き込みはDocuments内の差分保存データへ記録されます。完了後、Artifact `Win95iOS-unsigned` からIPAを取得できます。
+HDD URLを空欄にすれば従来どおり初回起動時にFiles pickerが表示されます。同梱したベースHDD自体は変更されず、ゲストによる書き込みはDocuments内の差分保存データへ記録されます。`.sav` も指定した場合はFFDDヘッダーとレコード境界を検査し、同梱HDDを初めて使う時だけDocumentsへコピーして、その続きから永続保存します。`.sav` は必ず指定したベースHDDから作られたものを使用してください。完了後、Artifact `Win95iOS-unsigned` からIPAを取得できます。
 
 同梱HDDはFiles pickerで以前取り込んだHDDより優先して起動します。ベースHDDのサイズと5地点の64 KiBサンプルから識別子を作り、別のWindowsイメージへ変わった場合は旧 `.sav` と一時停止状態を新しいHDDへ適用しません。旧データは `Saves/` 内の `.previous-base-image-*` または初回移行時の `.unverified-base-image-*` へ退避され、削除されません。
 

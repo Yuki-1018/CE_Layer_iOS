@@ -46,6 +46,14 @@ on:
         description: Optional SHA-256 of the HDD download
         required: false
         type: string
+      hdd_save_url:
+        description: Optional direct HTTPS URL of the matching FFDD .sav overlay
+        required: false
+        type: string
+      hdd_save_sha256:
+        description: Optional SHA-256 of the .sav download
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -60,7 +68,7 @@ jobs:
         run: scripts/fetch_core.sh
       - name: Test audio buffering, Win9x CPU segment limits, persistence and multi-disc ATAPI swaps
         run: bash scripts/test_core_storage.sh
-      - name: Test optional bundled IMG and VHD preparation
+      - name: Test optional bundled IMG, VHD and FFDD save preparation
         run: bash scripts/test_bundled_disk.sh
 
   build:
@@ -75,6 +83,8 @@ jobs:
       HDD_IMAGE_URL: ${{ inputs.hdd_image_url || '' }}
       HDD_IMAGE_FORMAT: ${{ inputs.hdd_image_format || 'auto' }}
       HDD_IMAGE_SHA256: ${{ inputs.hdd_image_sha256 || '' }}
+      HDD_SAVE_URL: ${{ inputs.hdd_save_url || '' }}
+      HDD_SAVE_SHA256: ${{ inputs.hdd_save_sha256 || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -112,6 +122,22 @@ jobs:
             echo "HDD image SHA-256 must contain exactly 64 hexadecimal characters." >&2
             exit 1
           fi
+          if [[ -n "$HDD_SAVE_URL" && ! "$HDD_SAVE_URL" =~ ^https:// ]]; then
+            echo "HDD save URL must use HTTPS." >&2
+            exit 1
+          fi
+          if [[ -n "$HDD_SAVE_SHA256" && ! "$HDD_SAVE_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+            echo "HDD save SHA-256 must contain exactly 64 hexadecimal characters." >&2
+            exit 1
+          fi
+          if [[ -n "$HDD_SAVE_URL" && -z "$HDD_IMAGE_URL" ]]; then
+            echo "A bundled .sav requires its matching hdd_image_url." >&2
+            exit 1
+          fi
+          if [[ -n "$HDD_SAVE_SHA256" && -z "$HDD_SAVE_URL" ]]; then
+            echo "hdd_save_sha256 requires hdd_save_url." >&2
+            exit 1
+          fi
           case "$GUEST_PROFILE" in
             windows95) echo "WIN9X_CPU_CYCLES=77000" >> "$GITHUB_ENV" ;;
             windows98|windowsme) echo "WIN9X_CPU_CYCLES=100000" >> "$GITHUB_ENV" ;;
@@ -141,6 +167,22 @@ jobs:
             fi
           fi
           scripts/prepare_bundled_disk.sh "$RUNNER_TEMP/win9x-base-disk" "$HDD_IMAGE_FORMAT"
+
+      - name: Download and validate optional bundled HDD save
+        if: ${{ env.HDD_SAVE_URL != '' }}
+        run: |
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --retry 3 --max-time 1800 --max-filesize 4294967295 \
+            --output "$RUNNER_TEMP/win9x-base-save" "$HDD_SAVE_URL"
+          if [[ -n "$HDD_SAVE_SHA256" ]]; then
+            actual_sha="$(shasum -a 256 "$RUNNER_TEMP/win9x-base-save" | awk '{print $1}')"
+            expected_sha="$(printf '%s' "$HDD_SAVE_SHA256" | tr '[:upper:]' '[:lower:]')"
+            if [[ "$actual_sha" != "$expected_sha" ]]; then
+              echo "HDD save SHA-256 mismatch." >&2
+              exit 1
+            fi
+          fi
+          scripts/prepare_bundled_save.sh "$RUNNER_TEMP/win9x-base-save"
 
       - name: Build unsigned application
         run: |
@@ -172,6 +214,9 @@ jobs:
           if [[ -n "$HDD_IMAGE_URL" ]]; then
             find build/DerivedData/Build/Products/Release-iphoneos/Win95iOS.app/BundledContent \
               -maxdepth 1 -type f \( -name 'win95-base.img' -o -name 'win95-base.vhd' \) | grep -q .
+          fi
+          if [[ -n "$HDD_SAVE_URL" ]]; then
+            test -f build/DerivedData/Build/Products/Release-iphoneos/Win95iOS.app/BundledContent/win95-base-CDRIVE.sav
           fi
           mkdir -p build/Payload
           cp -R build/DerivedData/Build/Products/Release-iphoneos/Win95iOS.app build/Payload/
