@@ -4,6 +4,7 @@
 #include "../src/dos/drives.h"
 #include "../src/dos/cdrom.h"
 #include "libretro.h"
+#include "../Win95iOS/Bridge/AudioRingBuffer.hpp"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -44,6 +45,8 @@ static std::vector<unsigned char> readFile(const std::string& path) {
 }
 static std::unique_ptr<imageDisk> disk(const std::string& path) {
     rawFile* file = rawFile::TryOpen(path.c_str()); check(file != nullptr, "rawFile open");
+    // imageDisk owns and releases one DOS_File reference.
+    file->AddRef();
     std::unique_ptr<imageDisk> result(new imageDisk(file, path.c_str(), 16384, true));
     result->Set_GeometryForHardDisk(); return result;
 }
@@ -81,6 +84,26 @@ static int16_t input(unsigned, unsigned, unsigned, unsigned) { return 0; }
 int main(int argc, char** argv) {
     try {
         check(argc == 2, "provide a temporary fixture directory"); directory = argv[1];
+
+        // Audio begins only after a complete prebuffer and re-primes without
+        // consuming a fragment after an underrun. This is the path used to
+        // avoid clicks during boot and transient Full-core scheduling stalls.
+        {
+            AudioRingBuffer audioQueue(16, 4);
+            std::array<int16_t, 12> input = {{1000, -1000, 2000, -2000, 3000, -3000,
+                                              4000, -4000, 5000, -5000, 6000, -6000}};
+            std::array<int16_t, 8> output;
+            audioQueue.write(input.data(), 3);
+            check(audioQueue.read(output.data(), 4) == 0, "audio waits for complete prebuffer");
+            check(audioQueue.availableFrames() == 3, "prebuffer does not consume partial audio");
+            audioQueue.write(input.data() + 6, 3);
+            check(audioQueue.read(output.data(), 4) == 4, "primed audio block renders");
+            check(output[0] > 0 && output[1] < 0, "stereo channels survive fade-in");
+            check(audioQueue.read(output.data(), 4) == 4, "audio underrun uses click-free fade");
+            check(audioQueue.availableFrames() == 2, "underrun preserves producer tail");
+            audioQueue.write(input.data(), 2);
+            check(audioQueue.read(output.data(), 4) == 4, "audio resumes after re-prime");
+        }
         std::vector<unsigned char> raw(16 * 1024 * 1024);
         raw[0] = 0xEB; raw[1] = 0xFE; raw[510] = 0x55; raw[511] = 0xAA; // boot: jmp $
         std::fill(raw.begin() + 100 * 512, raw.begin() + 101 * 512, 0x77);
@@ -202,7 +225,7 @@ int main(int argc, char** argv) {
         check(CDROM_Interface_Image::images[25]->ReadSector(restoredCD.data(), false, 20) && restoredCD[0] == 0x5A, "CD readable after suspend restore");
         netpacket.poll(); netpacket.stop(); dbp_win95_set_nat_active(false);
         dbp_win95_flush_disk(); retro_unload_game(); retro_deinit();
-        puts("PASS: full CPU compatibility, netpacket registration, storage recovery and repeated multi-disc live swap/eject");
+        puts("PASS: audio buffering, full CPU compatibility, networking, storage recovery and repeated multi-disc live swap/eject");
         return 0;
     } catch (const std::exception& e) { fprintf(stderr, "FAIL: %s\n", e.what()); std::_Exit(1); }
 }

@@ -1,5 +1,6 @@
 #import "CoreBridge.h"
 #import "SlirpBridge.h"
+#include "AudioRingBuffer.hpp"
 
 #include <libretro.h>
 #include <algorithm>
@@ -155,8 +156,7 @@ static void CoreLog(enum retro_log_level level, const char *format, ...) {
     double _videoAspectRatio;
     uint64_t _videoGeneration;
 
-    std::mutex _audioMutex;
-    std::deque<int16_t> _audio;
+    AudioRingBuffer _audio;
 
     std::mutex _operationMutex;
     std::deque<Operation> _operations;
@@ -294,7 +294,9 @@ static int NetworkGetPollEvents(int index, void *opaque) {
             {"dosbox_pure_menu_time", "0"},
             {"dosbox_pure_mouse_input", "true"},
             {"dosbox_pure_mouse_speed_factor", "1.0"},
-            {"dosbox_pure_cycles", "77000"},
+            // Adapt below the Pentium 100 MHz ceiling when the device cannot
+            // sustain it, preventing CPU saturation from starving audio.
+            {"dosbox_pure_cycles", "auto"},
             {"dosbox_pure_cycles_max", "77000"},
             {"dosbox_pure_machine", "svga"},
             {"dosbox_pure_svga", "svga_s3"},
@@ -330,6 +332,7 @@ static int NetworkGetPollEvents(int index, void *opaque) {
     _stopRequested = false;
     _guestShutdownRequested = false;
     _paused = false;
+    _audio.reset();
     {
         std::lock_guard<std::mutex> lock(_inputMutex);
         _keyEvents.clear();
@@ -380,7 +383,10 @@ static int NetworkGetPollEvents(int index, void *opaque) {
         while (!_stopRequested.load()) {
             @autoreleasepool {
                 [self processOperations];
-                if (_resetRequested.exchange(false)) retro_reset();
+                if (_resetRequested.exchange(false)) {
+                    _audio.reset();
+                    retro_reset();
+                }
                 if (!_paused.load()) {
                     [self processKeyEvents];
                     [self pollNetwork];
@@ -431,6 +437,7 @@ static int NetworkGetPollEvents(int index, void *opaque) {
 - (void)setEmulationPaused:(BOOL)paused {
     const bool changed = _paused.exchange(paused) != paused;
     if (paused) {
+        _audio.reset();
         {
             std::lock_guard<std::mutex> lock(_inputMutex);
             _keyEvents.clear();
@@ -561,20 +568,11 @@ static int NetworkGetPollEvents(int index, void *opaque) {
 }
 
 - (size_t)receiveAudio:(const int16_t *)data frames:(size_t)frames {
-    std::lock_guard<std::mutex> lock(_audioMutex);
-    const size_t samples = frames * 2;
-    const size_t capacity = 48000 * 2;
-    while (_audio.size() + samples > capacity && !_audio.empty()) _audio.pop_front();
-    _audio.insert(_audio.end(), data, data + samples);
-    return frames;
+    return _audio.write(data, frames);
 }
 
 - (NSUInteger)readAudioFrames:(int16_t *)buffer maxFrames:(NSUInteger)maxFrames {
-    std::lock_guard<std::mutex> lock(_audioMutex);
-    NSUInteger frames = MIN(maxFrames, _audio.size() / 2);
-    for (NSUInteger i = 0; i < frames * 2; ++i) { buffer[i] = _audio.front(); _audio.pop_front(); }
-    if (frames < maxFrames) memset(buffer + frames * 2, 0, (maxFrames - frames) * 2 * sizeof(int16_t));
-    return frames;
+    return _audio.read(buffer, maxFrames);
 }
 
 - (void)sendKey:(unsigned)keyCode pressed:(BOOL)pressed {

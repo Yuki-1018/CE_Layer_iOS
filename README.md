@@ -7,14 +7,14 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 ## 実装済み
 
 - DOSBox Pure の x86 interpreter を固定コミットからビルド（JIT/dynarec 無効）
-- Pentium (`pentium_slow`)、128 MB、77000 cycles、S3 Trio64、SB16 の固定オプション（このコアではMMX無効のため `pentium_mmx` は使用しません）
+- Pentium (`pentium_slow`)、128 MB、最大77000 cycles、S3 Trio64、SB16 の固定オプション（負荷に応じてcyclesを自動調整。このコアではMMX無効のため `pentium_mmx` は使用しません）
 - Windows 95 OSR2のウィンドウDOSとWindows Meセットアップを優先し、ブートOSでは精度の高いFull CPU interpreterを使用
 - raw `.img` / `.vhd` の BIOS 自動起動（DOSBox Pure のスタートメニューを表示しない）
 - 初回起動時やベースイメージ未配置時に表示する、iPhone横向きにも対応したイメージ選択画面
 - 512-byte sector 単位の永続 differencing disk
 - base HDD は変更せず、変更 sector のみ `win95-base-CDRIVE.sav` に保存
 - Metal による XRGB8888 framebuffer 表示
-- AVAudioEngine による 48 kHz stereo PCM 出力
+- AVAudioEngine による 48 kHz stereo PCM出力（固定長リングバッファ、起動・アンダーラン時のプリバッファとクリック抑制フェード）
 - NE2000からlibslirpへ接続するDHCP/DNS付きuser-mode NAT
 - アスペクト比を維持する全画面 Metal 表示（iPhone、iPad、AirPlay ミラーリング対応）
 - 画面内を移動できる折りたたみ式コンパクト操作メニュー
@@ -55,7 +55,7 @@ scripts/validate_disk.sh path/to/win95-base.img
 
 `Actions` → `Build unsigned IPA` → `Run workflow` を実行します。実行画面ではホーム画面に表示するアプリ名、bundle ID、任意のカスタムアイコンURLを指定できます。アイコンは HTTPS で取得可能な1024×1024以上のPNG/JPEGを指定してください。空欄ならアイコンを追加せずにビルドします。完了後、Artifact `Win95iOS-unsigned` から IPA を取得できます。
 
-IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。Full CPU interpreterの選択、netpacket callbackの登録・開始・停止、FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOと内容の異なる複数ディスクの連続交換・読み出し・メモリ使用量、交換失敗時のメディア保持、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
+IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。音声のプリバッファ・アンダーラン復帰、Full CPU interpreterの選択、netpacket callbackの登録・開始・停止、FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOと内容の異なる複数ディスクの連続交換・読み出し・メモリ使用量、交換失敗時のメディア保持、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
 
 続いてIPAをビルドします。
 
@@ -136,7 +136,6 @@ bash scripts/test_core_storage.sh
 - 右上の `≡` をタップ: コンパクトメニューを展開／折りたたみ
 - `≡` をドラッグ: メニューを画面内の任意位置へ移動
 - キーボードアイコン: ソフトウェアキーボードを表示／非表示
-- `DOS`: `Alt+Enter` を送信してDOSプロンプトの全画面表示を切り替え。日本語版Windows 95 OSR2.1でウィンドウ表示が黒くなる場合の回避にも使用します。
 - 特殊キーバーの Win/Ctrl/Alt/Shift: 選択後に文字または特殊キーを押すと同時押しとして送信
 - `CD`: CD-ROM 管理画面を開く。複数枚をまとめて追加してディスク順を保存でき、`前のディスク` / `次のディスク` または任意のディスクのタップでライブ交換できます。編集モードでは並べ替え、左スワイプでは削除、`CDを取り出す` では eject します。
 - 保存したCD選択を次回起動時に再接続します。新しいATAPIバックエンドでのマウント中に異常終了した場合は一度だけCDなしで起動し、選択情報を保持して復旧を案内します。
@@ -151,7 +150,7 @@ bash scripts/test_core_storage.sh
 ## 現在の制約
 
 - NE2000はuser-mode NAT（libslirp）へ接続され、外向きTCP/UDPとDNSを利用できます。Windows 95ではNE2000互換ドライバをI/O `0x300`、IRQ `10`で設定し、TCP/IPを追加してIPアドレスを自動取得してください。割り当ては通常 `10.0.2.15/24`、ゲートウェイ `10.0.2.2`、DNS `10.0.2.3`です。NATのため外部からguestへの新規接続は受け付けません。また当時のブラウザは現在のHTTPS/TLSに対応しない場合があります。
-- 日本語・韓国語版Windows 95 OSR2系には、DOSBox PureのNormal CPU coreでウィンドウ版MS-DOSプロンプトの再描画が壊れる既知の互換性問題があります。`DOS`ボタンまたはショートカットの［プロパティ］→［画面］→［全画面表示］を使用してください。
+- 日本語・韓国語版Windows 95 OSR2系でNormal CPU core使用時に起きるウィンドウ版MS-DOSプロンプトの再描画不良を避けるため、互換性重視のFull CPU interpreterを使用します。それでもゲスト固有の問題が起きる場合は、ショートカットの［プロパティ］→［画面］→［全画面表示］を試してください。
 - Win95 の CPU 負荷は高く、古い端末では実時間速度に届かない場合があります。iOS の実行コード制限に抵触しないよう JIT は意図的に使用していません。
 - Windows の shutdown 完了時は HDD overlay を flush してからアプリが自動終了します。
 
