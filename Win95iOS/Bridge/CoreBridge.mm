@@ -294,10 +294,12 @@ static int NetworkGetPollEvents(int index, void *opaque) {
             {"dosbox_pure_menu_time", "0"},
             {"dosbox_pure_mouse_input", "true"},
             {"dosbox_pure_mouse_speed_factor", "1.0"},
-            // Adapt below the Pentium 100 MHz ceiling when the device cannot
-            // sustain it, preventing CPU saturation from starving audio.
-            {"dosbox_pure_cycles", "auto"},
-            {"dosbox_pure_cycles_max", "77000"},
+            // A fixed clock avoids AUTO's large cycle swings while Win9x is
+            // switching between protected mode and a virtual DOS machine.
+            // Roughly Pentium 166-class throughput, above Windows Me's setup
+            // CPU check while remaining below the 200000-cycle preset.
+            {"dosbox_pure_cycles", "100000"},
+            {"dosbox_pure_cycles_max", "100000"},
             {"dosbox_pure_machine", "svga"},
             {"dosbox_pure_svga", "svga_s3"},
             {"dosbox_pure_svgamem", "2"},
@@ -305,11 +307,11 @@ static int NetworkGetPollEvents(int index, void *opaque) {
             {"dosbox_pure_voodoo_perf", "0"},
             {"dosbox_pure_memory_size", "128"},
             {"dosbox_pure_cpu_type", "pentium_slow"},
-            // The Full interpreter is slower but avoids the Normal core's
-            // Win9x V86/DOS-window corruption and is safer during OS upgrades.
-            {"dosbox_pure_cpu_core", "full"},
+            // This Normal interpreter includes the ported segment-cache and
+            // #GP behavior Win95 OSR2 uses to start virtual DOS machines.
+            {"dosbox_pure_cpu_core", "normal"},
             {"dosbox_pure_bootos_ramdisk", "diff"},
-            {"dosbox_pure_bootos_forcenormal", "false"},
+            {"dosbox_pure_bootos_forcenormal", "true"},
             {"dosbox_pure_audiorate", "48000"},
             {"dosbox_pure_sblaster_type", "sb16"},
             {"dosbox_pure_sblaster_conf", "A220 I7 D1 H5"},

@@ -15,7 +15,7 @@ final class AudioOutput {
         try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
         try? session.setPreferredSampleRate(48_000)
         // A stable 512-frame render quantum keeps latency reasonable while
-        // leaving enough time for the Full CPU interpreter to produce audio.
+        // leaving enough time for the emulator thread to produce audio.
         try? session.setPreferredIOBufferDuration(512.0 / 48_000.0)
         try session.setActive(true)
 

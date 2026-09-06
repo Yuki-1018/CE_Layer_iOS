@@ -7,8 +7,8 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 ## 実装済み
 
 - DOSBox Pure の x86 interpreter を固定コミットからビルド（JIT/dynarec 無効）
-- Pentium (`pentium_slow`)、128 MB、最大77000 cycles、S3 Trio64、SB16 の固定オプション（負荷に応じてcyclesを自動調整。このコアではMMX無効のため `pentium_mmx` は使用しません）
-- Windows 95 OSR2のウィンドウDOSとWindows Meセットアップを優先し、ブートOSでは精度の高いFull CPU interpreterを使用
+- Pentium (`pentium_slow`)、128 MB、100000 fixed cycles（Pentium 166相当を目安）、S3 Trio64、SB16 の固定オプション（Windows MeセットアップのCPU判定とV86切替を考慮し、cyclesの自動変動は使いません。このコアではMMX無効のため `pentium_mmx` は使用しません）
+- Windows 95 OSR2のウィンドウDOSとWindows Meセットアップ向けに、CPUセグメント境界キャッシュと正しいGeneral Protection例外をNormal interpreterへ移植
 - raw `.img` / `.vhd` の BIOS 自動起動（DOSBox Pure のスタートメニューを表示しない）
 - 初回起動時やベースイメージ未配置時に表示する、iPhone横向きにも対応したイメージ選択画面
 - 512-byte sector 単位の永続 differencing disk
@@ -55,7 +55,7 @@ scripts/validate_disk.sh path/to/win95-base.img
 
 `Actions` → `Build unsigned IPA` → `Run workflow` を実行します。実行画面ではホーム画面に表示するアプリ名、bundle ID、任意のカスタムアイコンURLを指定できます。アイコンは HTTPS で取得可能な1024×1024以上のPNG/JPEGを指定してください。空欄ならアイコンを追加せずにビルドします。完了後、Artifact `Win95iOS-unsigned` から IPA を取得できます。
 
-IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。音声のプリバッファ・アンダーラン復帰、Full CPU interpreterの選択、netpacket callbackの登録・開始・停止、FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOと内容の異なる複数ディスクの連続交換・読み出し・メモリ使用量、交換失敗時のメディア保持、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
+IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。音声のプリバッファ・アンダーラン復帰、Normal CPU interpreterとセグメント境界キャッシュ、netpacket callbackの登録・開始・停止、FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOと内容の異なる複数ディスクの連続交換・読み出し・メモリ使用量、交換失敗時のメディア保持、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
 
 続いてIPAをビルドします。
 
@@ -122,7 +122,7 @@ CD読み込み時はISOの形式判定を先に行い、CUEとしての試し読
 
 旧CDバックエンドからの更新時は `automatic-suspend.state` を `automatic-suspend.previous-core-UUID.state` へ退避し、一度通常起動します。必要なCDが見つからないときも、そのCDを前提とする一時停止状態は `.media-unavailable-UUID.state` へ退避します。HDDの `.sav` は削除しません。更新後に作成した一時停止状態は引き続き復元できます。
 
-Normal CPU coreで作成された旧一時停止状態も `automatic-suspend.previous-execution-core-UUID.state` へ削除せず退避し、Full coreへ移行する最初の1回だけ通常起動します。以後に作成した一時停止状態は従来どおり次回起動時に復元されます。
+旧CPU状態には追加したセグメントキャッシュが含まれないため、更新後の最初の1回だけ `automatic-suspend.previous-cpu-segment-cache-UUID.state` へ削除せず退避して通常起動します。以後に作成した一時停止状態は従来どおり次回起動時に復元されます。
 
 ローカルで同じ回帰テストを実行する場合:
 
@@ -150,7 +150,7 @@ bash scripts/test_core_storage.sh
 ## 現在の制約
 
 - NE2000はuser-mode NAT（libslirp）へ接続され、外向きTCP/UDPとDNSを利用できます。Windows 95ではNE2000互換ドライバをI/O `0x300`、IRQ `10`で設定し、TCP/IPを追加してIPアドレスを自動取得してください。割り当ては通常 `10.0.2.15/24`、ゲートウェイ `10.0.2.2`、DNS `10.0.2.3`です。NATのため外部からguestへの新規接続は受け付けません。また当時のブラウザは現在のHTTPS/TLSに対応しない場合があります。
-- 日本語・韓国語版Windows 95 OSR2系でNormal CPU core使用時に起きるウィンドウ版MS-DOSプロンプトの再描画不良を避けるため、互換性重視のFull CPU interpreterを使用します。それでもゲスト固有の問題が起きる場合は、ショートカットの［プロパティ］→［画面］→［全画面表示］を試してください。
+- 日本語・韓国語版Windows 95 OSR2系がウィンドウ版MS-DOSプロンプトを開始するときに利用する、ゼロ長コードセグメントへのアクセスとGeneral Protection例外をNormal CPU interpreterで再現します。CPUクロックもAUTOではなく固定し、V86切替中の急激なサイクル変動を防ぎます。旧一時停止状態は自動退避されるため、更新直後は通常起動になります。
 - Win95 の CPU 負荷は高く、古い端末では実時間速度に届かない場合があります。iOS の実行コード制限に抵触しないよう JIT は意図的に使用していません。
 - Windows の shutdown 完了時は HDD overlay を flush してからアプリが自動終了します。
 

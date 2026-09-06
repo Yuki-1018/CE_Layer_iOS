@@ -50,7 +50,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private let cdMountInProgressKey = "CDMountInProgress"
     private let cdMountStateVersionKey = "CDMountStateVersion"
     private let suspendCompatibilityKey = "SuspendStorageBackendVersion"
-    private let suspendCompatibilityVersion = 4
+    private let suspendCompatibilityVersion = 5
     private var recoveredFromInterruptedCDMount = false
     private var importedDiskURL: URL? {
         for ext in ["img", "vhd"] {
@@ -301,9 +301,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private func preserveIncompatibleSuspendState() throws {
         let defaults = UserDefaults.standard
         guard defaults.integer(forKey: suspendCompatibilityKey) < suspendCompatibilityVersion else { return }
-        // Serialized CPU decoder state from the former Normal-core build must
-        // not override the Full compatibility interpreter selected at boot.
-        try archiveSuspendState(reason: "previous-execution-core")
+        // Segment-limit caches changed the serialized CPU layout. Preserve the
+        // old state, but do not feed it to the corrected Win9x interpreter.
+        try archiveSuspendState(reason: "previous-cpu-segment-cache")
         defaults.set(suspendCompatibilityVersion, forKey: suspendCompatibilityKey)
     }
 

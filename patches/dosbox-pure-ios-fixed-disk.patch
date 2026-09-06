@@ -278,6 +278,22 @@ index ff8c84b..4f76165 100644
  	bool ExportToFile(const char* path, bool vhd_format);
  	#else
  	imageDisk(FILE *imgFile, const char *imgName, Bit32u imgSizeK, bool isHardDisk);
+diff --git a/include/cpu.h b/include/cpu.h
+index fa447c7..585c5c6 100644
+--- a/include/cpu.h
++++ b/include/cpu.h
+@@ -350,6 +350,11 @@ public:
+ 	PhysPt GetBase (void) { 
+ 		return (saved.seg.base_24_31<<24) | (saved.seg.base_16_23<<16) | saved.seg.base_0_15; 
+ 	}
++	bool GetExpandDown (void) {
++		// Only data-segment descriptors use bit 2 as the expand-down flag.
++		if (!(saved.seg.type & 0x10) || (saved.seg.type & 0x08)) return false;
++		return (saved.seg.type & 0x04) != 0;
++	}
+ 	Bitu GetLimit (void) {
+ 		Bitu limit = (saved.seg.limit_16_19<<16) | saved.seg.limit_0_15;
+ 		if (saved.seg.g)	return (limit<<12) | 0xFFF;
 diff --git a/include/keyboard.h b/include/keyboard.h
 index 8d8bf0b..d965b11 100644
 --- a/include/keyboard.h
@@ -290,6 +306,292 @@ index 8d8bf0b..d965b11 100644
  
  	
  	KBD_LAST
+diff --git a/include/regs.h b/include/regs.h
+index c07c4cb..620616f 100644
+--- a/include/regs.h
++++ b/include/regs.h
+@@ -54,6 +54,7 @@
+ struct Segment {
+ 	Bit16u val;
+ 	PhysPt phys;							/* The phyiscal address start in emulated machine */
++	PhysPt limit;
+ };
+ 
+ enum SegNames { es=0,cs,ss,ds,fs,gs};
+@@ -61,6 +62,8 @@ enum SegNames { es=0,cs,ss,ds,fs,gs};
+ struct Segments {
+ 	Bit16u val[8];
+ 	PhysPt phys[8];
++	PhysPt limit[8];
++	bool expanddown[8];
+ };
+ 
+ union GenReg32 {
+@@ -97,6 +100,14 @@ static INLINE PhysPt SegPhys(SegNames index) {
+ 	return Segs.phys[index];
+ }
+ 
++static INLINE PhysPt SegLimit(SegNames index) {
++	return Segs.limit[index];
++}
++
++static INLINE bool SegAccessWithinLimit(SegNames index, PhysPt offset) {
++	return Segs.expanddown[index] ? offset > SegLimit(index) : offset <= SegLimit(index);
++}
++
+ static INLINE Bit16u SegValue(SegNames index) {
+ 	return (Bit16u)Segs.val[index];
+ }
+diff --git a/src/cpu/core_normal.cpp b/src/cpu/core_normal.cpp
+index 037b550..7cc44ab 100644
+--- a/src/cpu/core_normal.cpp
++++ b/src/cpu/core_normal.cpp
+@@ -190,6 +190,11 @@ restart_opcode:
+ #endif
+ 			CPU_Exception(6,0);
+ 			continue;
++		gp_fault:
++			// Win95 OSR2 deliberately crosses a zero-length execute-only
++			// segment to enter its virtual DOS machine.
++			CPU_Exception(EXCEPTION_GP,0);
++			continue;
+ 		}
+ 		SAVEIP;
+ 	}
+diff --git a/src/cpu/core_normal/table_ea.h b/src/cpu/core_normal/table_ea.h
+index 18e256a..b2e49a3 100644
+--- a/src/cpu/core_normal/table_ea.h
++++ b/src/cpu/core_normal/table_ea.h
+@@ -174,12 +174,10 @@ static GetEAHandler EATable[512]={
+ 	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0
+ };
+ 
+-#define GetEADirect							\
+-	PhysPt eaa;								\
+-	if (TEST_PREFIX_ADDR) {					\
+-		eaa=BaseDS+Fetchd();				\
+-	} else {								\
+-		eaa=BaseDS+Fetchw();				\
+-	}										\
+-
+-
++#define GetEADirect                                      \
++	PhysPt eaa;                                            \
++	if (TEST_PREFIX_ADDR) eaa=Fetchd();                    \
++	else eaa=Fetchw();                                     \
++	if (!SegAccessWithinLimit(core.base_val_ds, eaa))      \
++		goto gp_fault;                                       \
++	eaa += BaseDS;
+diff --git a/src/cpu/core_prefetch.cpp b/src/cpu/core_prefetch.cpp
+index a4f6533..e793427 100644
+--- a/src/cpu/core_prefetch.cpp
++++ b/src/cpu/core_prefetch.cpp
+@@ -295,6 +295,10 @@ restart_opcode:
+ 			CPU_Exception(6,0);
+ 			invalidate_pq=true;
+ 			continue;
++		gp_fault:
++			CPU_Exception(EXCEPTION_GP,0);
++			invalidate_pq=true;
++			continue;
+ 		}
+ 		SAVEIP;
+ 	}
+@@ -324,4 +328,3 @@ Bits CPU_Core_Prefetch_Trap_Run(void) {
+ void CPU_Core_Prefetch_Init(void) {
+ 
+ }
+-
+diff --git a/src/cpu/core_simple.cpp b/src/cpu/core_simple.cpp
+index 653b3c6..9464fea 100644
+--- a/src/cpu/core_simple.cpp
++++ b/src/cpu/core_simple.cpp
+@@ -182,6 +182,9 @@ restart_opcode:
+ #endif
+ 			CPU_Exception(6,0);
+ 			continue;
++		gp_fault:
++			CPU_Exception(EXCEPTION_GP,0);
++			continue;
+ 		}
+ 		SAVEIP;
+ 	}
+diff --git a/src/cpu/cpu.cpp b/src/cpu/cpu.cpp
+index d28878b..4ceef7e 100644
+--- a/src/cpu/cpu.cpp
++++ b/src/cpu/cpu.cpp
+@@ -502,6 +502,8 @@ bool CPU_SwitchTask(Bitu new_tss_selector,TSwitchType tstype,Bitu old_eip) {
+ 		case DESC_CODE_R_C_A:		case DESC_CODE_R_C_NA:
+ 			if (cpu.cpl < cs_desc.DPL()) E_Exit("Task CS RPL < DPL");
+ doconforming:
++			Segs.expanddown[cs]=cs_desc.GetExpandDown();
++			Segs.limit[cs]=cs_desc.GetLimit();
+ 			Segs.phys[cs]=cs_desc.GetBase();
+ 			cpu.code.big=cs_desc.Big()>0;
+ 			Segs.val[cs]=new_cs;
+@@ -680,6 +682,8 @@ void CPU_Interrupt(Bitu num,Bitu type,Bitu oldeip) {
+ 							EXCEPTION_SS,(n_ss & 0xfffc)+((type&CPU_INT_SOFTWARE)?0:1))
+ 
+ 						// commit point
++						Segs.expanddown[ss]=n_ss_desc.GetExpandDown();
++						Segs.limit[ss]=n_ss_desc.GetLimit();
+ 						Segs.phys[ss]=n_ss_desc.GetBase();
+ 						Segs.val[ss]=n_ss;
+ 						if (n_ss_desc.Big()) {
+@@ -743,6 +747,8 @@ do_interrupt:
+ 
+ 				Segs.val[cs]=(gate_sel&0xfffc) | cpu.cpl;
+ 				Segs.phys[cs]=cs_desc.GetBase();
++				Segs.limit[cs]=cs_desc.GetLimit();
++				Segs.expanddown[cs]=cs_desc.GetExpandDown();
+ 				cpu.code.big=cs_desc.Big()>0;
+ 				reg_eip=gate_off;
+ 
+@@ -932,6 +938,8 @@ void CPU_IRET(bool use32,Bitu oldeip) {
+ 
+ 			// commit point
+ 			reg_esp=tempesp;
++			Segs.expanddown[cs]=n_cs_desc.GetExpandDown();
++			Segs.limit[cs]=n_cs_desc.GetLimit();
+ 			Segs.phys[cs]=n_cs_desc.GetBase();
+ 			cpu.code.big=n_cs_desc.Big()>0;
+ 			Segs.val[cs]=n_cs_sel;
+@@ -982,6 +990,8 @@ void CPU_IRET(bool use32,Bitu oldeip) {
+ 
+ 			// commit point
+ 
++			Segs.expanddown[cs]=n_cs_desc.GetExpandDown();
++			Segs.limit[cs]=n_cs_desc.GetLimit();
+ 			Segs.phys[cs]=n_cs_desc.GetBase();
+ 			cpu.code.big=n_cs_desc.Big()>0;
+ 			Segs.val[cs]=n_cs_sel;
+@@ -996,6 +1006,8 @@ void CPU_IRET(bool use32,Bitu oldeip) {
+ 
+ 			Segs.val[ss]=n_ss;
+ 			Segs.phys[ss]=n_ss_desc.GetBase();
++			Segs.limit[ss]=n_ss_desc.GetLimit();
++			Segs.expanddown[ss]=n_ss_desc.GetExpandDown();
+ 			if (n_ss_desc.Big()) {
+ 				cpu.stack.big=true;
+ 				cpu.stack.mask=0xffffffff;
+@@ -1062,6 +1074,8 @@ CODE_jmp:
+ 			}
+ 
+ 			/* Normal jump to another selector:offset */
++			Segs.expanddown[cs]=desc.GetExpandDown();
++			Segs.limit[cs]=desc.GetLimit();
+ 			Segs.phys[cs]=desc.GetBase();
+ 			cpu.code.big=desc.Big()>0;
+ 			Segs.val[cs]=(selector & 0xfffc) | cpu.cpl;
+@@ -1133,6 +1147,8 @@ CODE_jmp:
+ 					// zrdx extender
+ 
+ 					/* Switch to new CS:EIP */
++					Segs.expanddown[cs]=n_cs_desc.GetExpandDown();
++					Segs.limit[cs]=n_cs_desc.GetLimit();
+ 					Segs.phys[cs]	= n_cs_desc.GetBase();
+ 					Segs.val[cs]	= (uint16_t)((n_cs_sel & 0xfffc) | cpu.cpl);
+ 					cpu.code.big	= n_cs_desc.Big()>0;
+@@ -1215,6 +1231,8 @@ call_code:
+ 				reg_eip=offset;
+ 			}
+ 			//PAGE_FAULT_CLEANUP_CATCH(reg_esp = old_esp; reg_eip = old_eip;)
++			Segs.expanddown[cs]=call.GetExpandDown();
++			Segs.limit[cs]=call.GetLimit();
+ 			Segs.phys[cs]=call.GetBase();
+ 			cpu.code.big=call.Big()>0;
+ 			Segs.val[cs]=(selector & 0xfffc) | cpu.cpl;
+@@ -1316,6 +1334,8 @@ call_code:
+ 						// commit point
+ 						Segs.val[ss]=n_ss_sel;
+ 						Segs.phys[ss]=n_ss_desc.GetBase();
++						Segs.limit[ss]=n_ss_desc.GetLimit();
++						Segs.expanddown[ss]=n_ss_desc.GetExpandDown();
+ 						if (n_ss_desc.Big()) {
+ 							cpu.stack.big=true;
+ 							cpu.stack.mask=0xffffffff;
+@@ -1331,6 +1351,8 @@ call_code:
+ 						CPU_SetCPL(n_cs_desc.DPL());
+ 						Bit16u oldcs    = SegValue(cs);
+ 						/* Switch to new CS:EIP */
++						Segs.expanddown[cs]=n_cs_desc.GetExpandDown();
++						Segs.limit[cs]  = n_cs_desc.GetLimit();
+ 						Segs.phys[cs]	= n_cs_desc.GetBase();
+ 						Segs.val[cs]	= (n_cs_sel & 0xfffc) | cpu.cpl;
+ 						cpu.code.big	= n_cs_desc.Big()>0;
+@@ -1373,6 +1395,8 @@ call_code:
+ 					//PAGE_FAULT_CLEANUP_CATCH(reg_esp = old_esp; reg_eip = old_eip;)
+ 
+ 					/* Switch to new CS:EIP */
++					Segs.expanddown[cs]=n_cs_desc.GetExpandDown();
++					Segs.limit[cs]  = n_cs_desc.GetLimit();
+ 					Segs.phys[cs]	= n_cs_desc.GetBase();
+ 					Segs.val[cs]	= (n_cs_sel & 0xfffc) | cpu.cpl;
+ 					cpu.code.big	= n_cs_desc.Big()>0;
+@@ -1489,6 +1513,8 @@ RET_same_level:
+ 			}
+ 			//PAGE_FAULT_CLEANUP_CATCH(reg_esp = orig_esp;)
+ 
++			Segs.expanddown[cs]=desc.GetExpandDown();
++			Segs.limit[cs]=desc.GetLimit();
+ 			Segs.phys[cs]=desc.GetBase();
+ 			cpu.code.big=desc.Big()>0;
+ 			Segs.val[cs]=selector;
+@@ -1569,6 +1595,8 @@ RET_same_level:
+ 				EXCEPTION_SS,n_ss & 0xfffc)
+ 
+ 			CPU_SetCPL(rpl);
++			Segs.expanddown[cs]=desc.GetExpandDown();
++			Segs.limit[cs]=desc.GetLimit();
+ 			Segs.phys[cs]=desc.GetBase();
+ 			cpu.code.big=desc.Big()>0;
+ 			Segs.val[cs]=(selector&0xfffc) | cpu.cpl;
+@@ -1576,6 +1604,8 @@ RET_same_level:
+ 
+ 			Segs.val[ss]=n_ss;
+ 			Segs.phys[ss]=n_ss_desc.GetBase();
++			Segs.limit[ss]=n_ss_desc.GetLimit();
++			Segs.expanddown[ss]=n_ss_desc.GetExpandDown();
+ 			if (n_ss_desc.Big()) {
+ 				cpu.stack.big=true;
+ 				cpu.stack.mask=0xffffffff;
+@@ -2065,6 +2095,8 @@ bool CPU_SetSegGeneral(SegNames seg,Bitu value) {
+ 
+ 			Segs.val[seg]=value;
+ 			Segs.phys[seg]=desc.GetBase();
++			Segs.limit[seg]=desc.GetLimit();
++			Segs.expanddown[seg]=desc.GetExpandDown();
+ 			if (desc.Big()) {
+ 				cpu.stack.big=true;
+ 				cpu.stack.mask=0xffffffff;
+@@ -2109,6 +2141,8 @@ bool CPU_SetSegGeneral(SegNames seg,Bitu value) {
+ 
+ 			Segs.val[seg]=value;
+ 			Segs.phys[seg]=desc.GetBase();
++			Segs.limit[seg]=desc.GetLimit();
++			Segs.expanddown[seg]=desc.GetExpandDown();
+ 		}
+ 
+ 		return false;
+@@ -2474,12 +2508,12 @@ public:
+ 		reg_ebp=0;
+ 		reg_esp=0;
+ 	
+-		SegSet16(cs,0);
+-		SegSet16(ds,0);
+-		SegSet16(es,0);
+-		SegSet16(fs,0);
+-		SegSet16(gs,0);
+-		SegSet16(ss,0);
++		SegSet16(cs,0); Segs.limit[cs]=0xffff; Segs.expanddown[cs]=false;
++		SegSet16(ds,0); Segs.limit[ds]=0xffff; Segs.expanddown[ds]=false;
++		SegSet16(es,0); Segs.limit[es]=0xffff; Segs.expanddown[es]=false;
++		SegSet16(fs,0); Segs.limit[fs]=0xffff; Segs.expanddown[fs]=false;
++		SegSet16(gs,0); Segs.limit[gs]=0xffff; Segs.expanddown[gs]=false;
++		SegSet16(ss,0); Segs.limit[ss]=0xffff; Segs.expanddown[ss]=false;
+ 	
+ 		CPU_SetFlags(FLAG_IF,FMASK_ALL);		//Enable interrupts
+ 		cpu.cr0=0xffffffff;
 diff --git a/src/dbp_network.cpp b/src/dbp_network.cpp
 index 8ee32c2..0a1bcec 100644
 --- a/src/dbp_network.cpp

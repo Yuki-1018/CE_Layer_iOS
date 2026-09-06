@@ -1,6 +1,8 @@
 // Synthetic media only: no Windows files or third-party disk images required.
 #include "dosbox.h"
 #include "bios_disk.h"
+#include "cpu.h"
+#include "regs.h"
 #include "../src/dos/drives.h"
 #include "../src/dos/cdrom.h"
 #include "libretro.h"
@@ -61,7 +63,7 @@ static bool environment(unsigned cmd, void* data) {
     if (cmd == RETRO_ENVIRONMENT_GET_VARIABLE) {
         retro_variable* v = static_cast<retro_variable*>(data);
         const std::pair<const char*, const char*> options[] = {
-            {"dosbox_pure_cpu_core", "full"}, {"dosbox_pure_cpu_type", "pentium_slow"},
+            {"dosbox_pure_cpu_core", "normal"}, {"dosbox_pure_cpu_type", "pentium_slow"},
             {"dosbox_pure_cycles", "10000"}, {"dosbox_pure_memory_size", "128"},
             {"dosbox_pure_force60fps", "true"}, {"dosbox_pure_menu_time", "0"},
             {"dosbox_pure_conf", "false"}, {"dosbox_pure_voodoo", "off"},
@@ -87,7 +89,7 @@ int main(int argc, char** argv) {
 
         // Audio begins only after a complete prebuffer and re-primes without
         // consuming a fragment after an underrun. This is the path used to
-        // avoid clicks during boot and transient Full-core scheduling stalls.
+        // avoid clicks during boot and transient emulator scheduling stalls.
         {
             AudioRingBuffer audioQueue(16, 4);
             std::array<int16_t, 12> input = {{1000, -1000, 2000, -2000, 3000, -3000,
@@ -176,12 +178,28 @@ int main(int argc, char** argv) {
 
         retro_set_environment(environment); retro_set_video_refresh(video); retro_set_audio_sample_batch(audio);
         retro_set_input_poll(poll); retro_set_input_state(input); retro_init();
+        Descriptor expandDown;
+        expandDown.saved.seg.type = DESC_DATA_ED_RW_A;
+        expandDown.saved.seg.limit_0_15 = 0x1234;
+        check(expandDown.GetExpandDown() && expandDown.GetLimit() == 0x1234,
+              "protected-mode segment cache metadata");
         check(netpacket.start && netpacket.receive && netpacket.stop && netpacket.poll, "netpacket callbacks registered");
         dbp_win95_set_nat_active(true);
         netpacket.start(0, networkSend, networkReceivePoll);
         const std::string boot = directory + "/boot-fat.img#I*SVGA (Super Video Graphics Array)";
         retro_game_info info = {}; info.path = boot.c_str(); check(retro_load_game(&info), "load boot fixture");
-        check(!strcmp(DBP_CPU_GetDecoderName(), "Full"), "Win9x compatibility uses full CPU interpreter");
+        check(SegLimit(cs) == 0xffff && SegLimit(ds) == 0xffff,
+              "real-mode segment limits initialized");
+        const PhysPt savedDSLimit = Segs.limit[ds];
+        const bool savedDSExpandDown = Segs.expanddown[ds];
+        Segs.limit[ds] = 0;
+        Segs.expanddown[ds] = false;
+        check(!SegAccessWithinLimit(ds, 1),
+              "Win95 zero-length segment access raises general protection");
+        Segs.limit[ds] = savedDSLimit;
+        Segs.expanddown[ds] = savedDSExpandDown;
+        check(!strcmp(DBP_CPU_GetDecoderName(), "Normal"),
+              "Win9x compatibility uses segment-aware normal CPU interpreter");
         for (int i = 0; i < 300 && !dbp_win95_disk_ready(); ++i) retro_run();
         check(dbp_win95_disk_ready(), "BIOS/IDE ready");
         std::vector<unsigned char> iso(64 * 2048);
@@ -225,7 +243,7 @@ int main(int argc, char** argv) {
         check(CDROM_Interface_Image::images[25]->ReadSector(restoredCD.data(), false, 20) && restoredCD[0] == 0x5A, "CD readable after suspend restore");
         netpacket.poll(); netpacket.stop(); dbp_win95_set_nat_active(false);
         dbp_win95_flush_disk(); retro_unload_game(); retro_deinit();
-        puts("PASS: audio buffering, full CPU compatibility, networking, storage recovery and repeated multi-disc live swap/eject");
+        puts("PASS: audio buffering, Win9x segment-limit compatibility, networking, storage recovery and repeated multi-disc live swap/eject");
         return 0;
     } catch (const std::exception& e) { fprintf(stderr, "FAIL: %s\n", e.what()); std::_Exit(1); }
 }
