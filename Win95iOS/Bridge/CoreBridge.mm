@@ -303,9 +303,11 @@ static int NetworkGetPollEvents(int index, void *opaque) {
             {"dosbox_pure_voodoo_perf", "0"},
             {"dosbox_pure_memory_size", "128"},
             {"dosbox_pure_cpu_type", "pentium_slow"},
-            {"dosbox_pure_cpu_core", "normal"},
+            // The Full interpreter is slower but avoids the Normal core's
+            // Win9x V86/DOS-window corruption and is safer during OS upgrades.
+            {"dosbox_pure_cpu_core", "full"},
             {"dosbox_pure_bootos_ramdisk", "diff"},
-            {"dosbox_pure_bootos_forcenormal", "true"},
+            {"dosbox_pure_bootos_forcenormal", "false"},
             {"dosbox_pure_audiorate", "48000"},
             {"dosbox_pure_sblaster_type", "sb16"},
             {"dosbox_pure_sblaster_conf", "A220 I7 D1 H5"},

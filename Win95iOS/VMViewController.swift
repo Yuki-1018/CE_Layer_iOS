@@ -46,8 +46,11 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var cdDirectory: URL { supportDirectory.appendingPathComponent("CDs", isDirectory: true) }
     private var suspendStateURL: URL { savesDirectory.appendingPathComponent("automatic-suspend.state") }
     private let selectedCDKey = "SelectedCDImageName"
+    private let cdImageOrderKey = "CDImageOrder"
     private let cdMountInProgressKey = "CDMountInProgress"
     private let cdMountStateVersionKey = "CDMountStateVersion"
+    private let suspendCompatibilityKey = "SuspendStorageBackendVersion"
+    private let suspendCompatibilityVersion = 4
     private var recoveredFromInterruptedCDMount = false
     private var importedDiskURL: URL? {
         for ext in ["img", "vhd"] {
@@ -298,9 +301,11 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     private func preserveIncompatibleSuspendState() throws {
         let defaults = UserDefaults.standard
-        guard defaults.integer(forKey: "SuspendStorageBackendVersion") < 3 else { return }
-        try archiveSuspendState(reason: "previous-core")
-        defaults.set(3, forKey: "SuspendStorageBackendVersion")
+        guard defaults.integer(forKey: suspendCompatibilityKey) < suspendCompatibilityVersion else { return }
+        // Serialized CPU decoder state from the former Normal-core build must
+        // not override the Full compatibility interpreter selected at boot.
+        try archiveSuspendState(reason: "previous-execution-core")
+        defaults.set(suspendCompatibilityVersion, forKey: suspendCompatibilityKey)
     }
 
     private func archiveSuspendState(reason: String) throws {
@@ -411,16 +416,19 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             do {
-                var firstMountable: URL?
+                var importedImages: [URL] = []
                 for source in sources {
                     let destination = self.uniqueCDDestination(for: source, in: destinationDirectory)
                     try self.copyLargeFile(from: source, to: destination)
-                    if firstMountable == nil && self.isMountableCD(destination) { firstMountable = destination }
+                    if self.isMountableCD(destination) { importedImages.append(destination) }
                 }
                 DispatchQueue.main.async {
+                    self.appendToCDImageOrder(importedImages)
                     self.toolbar.showActivity(false)
                     self.refreshCDLibrary(busy: false)
-                    if self.activeCDURL == nil, let firstMountable { self.mountCD(firstMountable) }
+                    if self.activeCDURL == nil, let firstMountable = importedImages.first {
+                        self.mountCD(firstMountable)
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -529,8 +537,13 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             self.presentCDPicker(from: library)
         }
         library.onMount = { [weak self] url in self?.mountCD(url) }
+        library.onPrevious = { [weak self] in self?.changeCDBy(offset: -1) }
+        library.onNext = { [weak self] in self?.changeCDBy(offset: 1) }
         library.onEject = { [weak self] in self?.ejectCD() }
         library.onDelete = { [weak self] url in self?.confirmDeleteCD(url) }
+        library.onReorder = { [weak self] images in
+            self?.persistCDImageOrder(images)
+        }
         library.onDismiss = { [weak self] in self?.dismiss(animated: true) }
         cdLibraryController = library
 
@@ -540,7 +553,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     private func refreshCDLibrary(busy: Bool) {
-        cdLibraryController?.reload(images: storedCDImages, activeURL: activeCDURL, busy: busy)
+        let images = storedCDImages
+        persistCDImageOrder(images)
+        cdLibraryController?.reload(images: images, activeURL: activeCDURL, busy: busy)
     }
 
     private var storedCDImages: [URL] {
@@ -549,7 +564,27 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         )) ?? []
-        return urls.filter(isMountableCD).sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        let mountable = urls.filter(isMountableCD)
+        let byName = Dictionary(uniqueKeysWithValues: mountable.map { ($0.lastPathComponent, $0) })
+        let savedOrder = UserDefaults.standard.stringArray(forKey: cdImageOrderKey) ?? []
+        let ordered = savedOrder.compactMap { byName[$0] }
+        let orderedNames = Set(ordered.map(\.lastPathComponent))
+        let unlisted = mountable.filter { !orderedNames.contains($0.lastPathComponent) }.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+        return ordered + unlisted
+    }
+
+    private func persistCDImageOrder(_ images: [URL]) {
+        UserDefaults.standard.set(images.map(\.lastPathComponent), forKey: cdImageOrderKey)
+    }
+
+    private func appendToCDImageOrder(_ images: [URL]) {
+        guard !images.isEmpty else { return }
+        let importedNames = Set(images.map(\.lastPathComponent))
+        var ordered = storedCDImages.filter { !importedNames.contains($0.lastPathComponent) }
+        ordered.append(contentsOf: images)
+        persistCDImageOrder(ordered)
     }
 
     private func isMountableCD(_ url: URL) -> Bool {
@@ -581,6 +616,15 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     private func ejectCD() {
         changeCD(to: nil)
+    }
+
+    private func changeCDBy(offset: Int) {
+        guard !isChangingCD, let activeCDURL else { return }
+        let images = storedCDImages
+        guard let current = images.firstIndex(of: activeCDURL) else { return }
+        let destination = current + offset
+        guard images.indices.contains(destination) else { return }
+        mountCD(images[destination])
     }
 
     private func changeCD(to CD: URL?, automatic: Bool = false, afterChange: (() -> Void)? = nil) {
@@ -642,7 +686,10 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         refreshCDLibrary(busy: true)
         let removeFile = { [weak self] in
             guard let self else { return }
-            do { try FileManager.default.removeItem(at: url) }
+            do {
+                try FileManager.default.removeItem(at: url)
+                self.persistCDImageOrder(self.storedCDImages.filter { $0 != url })
+            }
             catch { self.showError(error) }
             self.refreshCDLibrary(busy: false)
         }
@@ -1098,9 +1145,19 @@ private final class PauseOverlayView: UIView {
 private final class CDLibraryViewController: UITableViewController {
     var onAdd: (() -> Void)?
     var onMount: ((URL) -> Void)?
+    var onPrevious: (() -> Void)?
+    var onNext: (() -> Void)?
     var onEject: (() -> Void)?
     var onDelete: ((URL) -> Void)?
+    var onReorder: (([URL]) -> Void)?
     var onDismiss: (() -> Void)?
+
+    private enum CurrentAction {
+        case status
+        case previous(Int)
+        case next(Int)
+        case eject
+    }
 
     private var images: [URL]
     private var activeURL: URL?
@@ -1122,12 +1179,13 @@ private final class CDLibraryViewController: UITableViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "CD-ROM"
-        navigationItem.leftBarButtonItem = UIBarButtonItem(
+        let addButton = UIBarButtonItem(
             barButtonSystemItem: .add,
             target: self,
             action: #selector(addImage)
         )
-        navigationItem.leftBarButtonItem?.accessibilityLabel = "CDイメージを追加"
+        addButton.accessibilityLabel = "CDイメージを追加"
+        navigationItem.leftBarButtonItems = [addButton, editButtonItem]
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .done,
             target: self,
@@ -1140,7 +1198,7 @@ private final class CDLibraryViewController: UITableViewController {
         self.images = images
         self.activeURL = activeURL
         self.busy = busy
-        navigationItem.leftBarButtonItem?.isEnabled = !busy
+        navigationItem.leftBarButtonItems?.forEach { $0.isEnabled = !busy }
         tableView.isUserInteractionEnabled = !busy
         tableView.alpha = busy ? 0.6 : 1
         if busy {
@@ -1157,17 +1215,17 @@ private final class CDLibraryViewController: UITableViewController {
     override func numberOfSections(in tableView: UITableView) -> Int { 2 }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        if section == 0 { return activeURL == nil ? 1 : 2 }
+        if section == 0 { return currentActions.count }
         return images.count + 1
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        section == 0 ? "現在のCD-ROM" : "保存済みイメージ"
+        section == 0 ? "現在のCD-ROM" : "インストールディスク（順番）"
     }
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         guard section == 1 else { return nil }
-        return "Windowsを動かしたままCDを挿入・交換・取り出しできます。左へスワイプすると削除できます。"
+        return "複数枚を一度に追加できます。順番を並べ替え、前／次のディスクへWindowsを動かしたまま交換できます。"
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -1175,10 +1233,15 @@ private final class CDLibraryViewController: UITableViewController {
         cell.textLabel?.numberOfLines = 1
 
         if indexPath.section == 0 {
-            if indexPath.row == 0 {
+            switch currentActions[indexPath.row] {
+            case .status:
                 if let activeURL {
                     cell.textLabel?.text = activeURL.lastPathComponent
-                    cell.detailTextLabel?.text = "D: にマウント中"
+                    if let index = images.firstIndex(of: activeURL) {
+                        cell.detailTextLabel?.text = "ディスク \(index + 1) / \(images.count) — D: にマウント中"
+                    } else {
+                        cell.detailTextLabel?.text = "D: にマウント中"
+                    }
                     cell.imageView?.image = UIImage(systemName: "opticaldisc.fill")
                 } else {
                     cell.textLabel?.text = "ディスクなし"
@@ -1186,7 +1249,13 @@ private final class CDLibraryViewController: UITableViewController {
                     cell.imageView?.image = UIImage(systemName: "opticaldisc")
                 }
                 cell.selectionStyle = .none
-            } else {
+            case .previous(let number):
+                cell.textLabel?.text = "前のディスク（ディスク \(number)）"
+                cell.imageView?.image = UIImage(systemName: "backward.end.fill")
+            case .next(let number):
+                cell.textLabel?.text = "次のディスク（ディスク \(number)）"
+                cell.imageView?.image = UIImage(systemName: "forward.end.fill")
+            case .eject:
                 cell.textLabel?.text = "CDを取り出す"
                 cell.textLabel?.textColor = .systemRed
                 cell.imageView?.image = UIImage(systemName: "eject.fill")
@@ -1202,9 +1271,10 @@ private final class CDLibraryViewController: UITableViewController {
         }
 
         let imageURL = images[indexPath.row - 1]
-        cell.textLabel?.text = imageURL.lastPathComponent
+        cell.textLabel?.text = "ディスク \(indexPath.row): \(imageURL.lastPathComponent)"
         if let size = try? imageURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-            cell.detailTextLabel?.text = byteFormatter.string(fromByteCount: Int64(size))
+            let sizeText = byteFormatter.string(fromByteCount: Int64(size))
+            cell.detailTextLabel?.text = imageURL == activeURL ? "\(sizeText) — マウント中" : sizeText
         }
         cell.imageView?.image = UIImage(systemName: "opticaldisc")
         cell.accessoryType = imageURL == activeURL ? .checkmark : .none
@@ -1215,7 +1285,12 @@ private final class CDLibraryViewController: UITableViewController {
         tableView.deselectRow(at: indexPath, animated: true)
         guard !busy else { return }
         if indexPath.section == 0 {
-            if indexPath.row == 1 { onEject?() }
+            switch currentActions[indexPath.row] {
+            case .previous(_): onPrevious?()
+            case .next(_): onNext?()
+            case .eject: onEject?()
+            case .status: break
+            }
         } else if indexPath.row == 0 {
             onAdd?()
         } else {
@@ -1226,6 +1301,33 @@ private final class CDLibraryViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
         !busy && indexPath.section == 1 && indexPath.row > 0
+    }
+
+    override func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool {
+        !busy && indexPath.section == 1 && indexPath.row > 0
+    }
+
+    override func tableView(
+        _ tableView: UITableView,
+        targetIndexPathForMoveFromRowAt sourceIndexPath: IndexPath,
+        toProposedIndexPath proposedDestinationIndexPath: IndexPath
+    ) -> IndexPath {
+        guard proposedDestinationIndexPath.section == 1 else {
+            return IndexPath(row: 1, section: 1)
+        }
+        return IndexPath(row: max(1, proposedDestinationIndexPath.row), section: 1)
+    }
+
+    override func tableView(
+        _ tableView: UITableView,
+        moveRowAt sourceIndexPath: IndexPath,
+        to destinationIndexPath: IndexPath
+    ) {
+        let moved = images.remove(at: sourceIndexPath.row - 1)
+        let destination = min(max(0, destinationIndexPath.row - 1), images.count)
+        images.insert(moved, at: destination)
+        onReorder?(images)
+        DispatchQueue.main.async { [weak self] in self?.tableView.reloadData() }
     }
 
     override func tableView(
@@ -1239,6 +1341,15 @@ private final class CDLibraryViewController: UITableViewController {
 
     @objc private func addImage() { if !busy { onAdd?() } }
     @objc private func dismissLibrary() { onDismiss?() }
+
+    private var currentActions: [CurrentAction] {
+        var actions: [CurrentAction] = [.status]
+        guard let activeURL, let index = images.firstIndex(of: activeURL) else { return actions }
+        if index > 0 { actions.append(.previous(index)) }
+        if index + 1 < images.count { actions.append(.next(index + 2)) }
+        actions.append(.eject)
+        return actions
+    }
 }
 
 private extension UTType {

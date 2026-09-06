@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch pinned emulator core
         run: scripts/fetch_core.sh
-      - name: Test core networking hooks, disk persistence and live ATAPI media changes
+      - name: Test Full CPU compatibility, networking, persistence and multi-disc ATAPI swaps
         run: bash scripts/test_core_storage.sh
 
   build:

@@ -8,6 +8,7 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 
 - DOSBox Pure の x86 interpreter を固定コミットからビルド（JIT/dynarec 無効）
 - Pentium (`pentium_slow`)、128 MB、77000 cycles、S3 Trio64、SB16 の固定オプション（このコアではMMX無効のため `pentium_mmx` は使用しません）
+- Windows 95 OSR2のウィンドウDOSとWindows Meセットアップを優先し、ブートOSでは精度の高いFull CPU interpreterを使用
 - raw `.img` / `.vhd` の BIOS 自動起動（DOSBox Pure のスタートメニューを表示しない）
 - 初回起動時やベースイメージ未配置時に表示する、iPhone横向きにも対応したイメージ選択画面
 - 512-byte sector 単位の永続 differencing disk
@@ -54,7 +55,7 @@ scripts/validate_disk.sh path/to/win95-base.img
 
 `Actions` → `Build unsigned IPA` → `Run workflow` を実行します。実行画面ではホーム画面に表示するアプリ名、bundle ID、任意のカスタムアイコンURLを指定できます。アイコンは HTTPS で取得可能な1024×1024以上のPNG/JPEGを指定してください。空欄ならアイコンを追加せずにビルドします。完了後、Artifact `Win95iOS-unsigned` から IPA を取得できます。
 
-IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。netpacket callbackの登録・開始・停止、FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOの連続交換・読み出し・メモリ使用量、交換失敗時のメディア保持、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
+IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。Full CPU interpreterの選択、netpacket callbackの登録・開始・停止、FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOと内容の異なる複数ディスクの連続交換・読み出し・メモリ使用量、交換失敗時のメディア保持、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
 
 続いてIPAをビルドします。
 
@@ -121,6 +122,8 @@ CD読み込み時はISOの形式判定を先に行い、CUEとしての試し読
 
 旧CDバックエンドからの更新時は `automatic-suspend.state` を `automatic-suspend.previous-core-UUID.state` へ退避し、一度通常起動します。必要なCDが見つからないときも、そのCDを前提とする一時停止状態は `.media-unavailable-UUID.state` へ退避します。HDDの `.sav` は削除しません。更新後に作成した一時停止状態は引き続き復元できます。
 
+Normal CPU coreで作成された旧一時停止状態も `automatic-suspend.previous-execution-core-UUID.state` へ削除せず退避し、Full coreへ移行する最初の1回だけ通常起動します。以後に作成した一時停止状態は従来どおり次回起動時に復元されます。
+
 ローカルで同じ回帰テストを実行する場合:
 
 ```bash
@@ -135,7 +138,7 @@ bash scripts/test_core_storage.sh
 - キーボードアイコン: ソフトウェアキーボードを表示／非表示
 - `DOS`: `Alt+Enter` を送信してDOSプロンプトの全画面表示を切り替え。日本語版Windows 95 OSR2.1でウィンドウ表示が黒くなる場合の回避にも使用します。
 - 特殊キーバーの Win/Ctrl/Alt/Shift: 選択後に文字または特殊キーを押すと同時押しとして送信
-- `CD`: CD-ROM 管理画面を開く。保存済みイメージのタップでライブmount、`CDを取り出す` で eject、左スワイプで削除。Windowsやアプリを終了せずにATAPIメディアを交換します。
+- `CD`: CD-ROM 管理画面を開く。複数枚をまとめて追加してディスク順を保存でき、`前のディスク` / `次のディスク` または任意のディスクのタップでライブ交換できます。編集モードでは並べ替え、左スワイプでは削除、`CDを取り出す` では eject します。
 - 保存したCD選択を次回起動時に再接続します。新しいATAPIバックエンドでのマウント中に異常終了した場合は一度だけCDなしで起動し、選択情報を保持して復旧を案内します。
 - `⏸` / `▶`: Windows の一時停止／再開（現在実行できる操作のアイコンを表示）。一時停止中にアプリを閉じた場合は、次回起動時に保存地点を復元して一時停止画面へ戻ります。
 - 1本指ドラッグ: マウスカーソル移動
