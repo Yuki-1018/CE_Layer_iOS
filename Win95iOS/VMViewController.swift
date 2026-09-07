@@ -41,11 +41,17 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     private lazy var supportDirectory: URL = {
         let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return root.appendingPathComponent("Win95", isDirectory: true)
+        return root.appendingPathComponent("Win9x", isDirectory: true)
     }()
-    private var legacySupportDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Win95", isDirectory: true)
+    private var legacySupportDirectories: [URL] {
+        let fileManager = FileManager.default
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return [
+            documents.appendingPathComponent("Win95", isDirectory: true),
+            applicationSupport.appendingPathComponent("Win9x", isDirectory: true),
+            applicationSupport.appendingPathComponent("Win95", isDirectory: true)
+        ]
     }
     private var savesDirectory: URL { supportDirectory.appendingPathComponent("Saves", isDirectory: true) }
     private var systemDirectory: URL { supportDirectory.appendingPathComponent("System", isDirectory: true) }
@@ -69,6 +75,18 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         for ext in ["img", "vhd"] {
             let url = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(ext)
             if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        return nil
+    }
+    private var packagedDiskURL: URL? {
+        for ext in ["img", "vhd"] {
+            if let url = Bundle.main.url(
+                forResource: "win95-base",
+                withExtension: ext,
+                subdirectory: "BundledContent"
+            ) {
+                return url
+            }
         }
         return nil
     }
@@ -125,9 +143,11 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private func createDirectories() {
         let fileManager = FileManager.default
         if !fileManager.fileExists(atPath: supportDirectory.path),
-           fileManager.fileExists(atPath: legacySupportDirectory.path) {
-            do { try fileManager.moveItem(at: legacySupportDirectory, to: supportDirectory) }
-            catch { NSLog("Could not migrate Windows 95 data into Documents: %@", error.localizedDescription) }
+           let legacyDirectory = legacySupportDirectories.first(where: {
+               fileManager.fileExists(atPath: $0.path)
+           }) {
+            do { try fileManager.moveItem(at: legacyDirectory, to: supportDirectory) }
+            catch { NSLog("Could not migrate Windows 9x data into Documents: %@", error.localizedDescription) }
         }
         try? FileManager.default.createDirectory(at: savesDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
@@ -270,14 +290,58 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     private func startBundledOrImportedDisk() {
         let initialCDs = recoverablePersistedCDURLs
-        for ext in ["img", "vhd"] {
-            if let bundled = Bundle.main.url(forResource: "win95-base", withExtension: ext, subdirectory: "BundledContent") {
-                startVM(disk: bundled, CDs: initialCDs)
-                return
+        if let importedDiskURL {
+            makeBaseDiskUserEditable(at: importedDiskURL)
+            startVM(disk: importedDiskURL, CDs: initialCDs)
+            return
+        }
+        guard let packagedDiskURL else {
+            showMissingDisk()
+            return
+        }
+
+        // An app bundle is signed and read-only. Expand a packaged HDD into
+        // Documents once so it appears in Files and can be replaced by the user.
+        showMissingDisk()
+        diskSetupView.setBusy(true, title: "同梱イメージを準備中…")
+        let destination = supportDirectory
+            .appendingPathComponent("win95-base")
+            .appendingPathExtension(packagedDiskURL.pathExtension.lowercased())
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.installPackagedDisk(from: packagedDiskURL, to: destination)
+                DispatchQueue.main.async { [weak self] in
+                    self?.startVM(disk: destination, CDs: initialCDs)
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.diskSetupView.setBusy(false)
+                    self.showError(error)
+                }
             }
         }
-        if let importedDiskURL { startVM(disk: importedDiskURL, CDs: initialCDs); return }
-        showMissingDisk()
+    }
+
+    private func installPackagedDisk(from source: URL, to destination: URL) throws {
+        let fileManager = FileManager.default
+        let temporary = supportDirectory.appendingPathComponent("packaged-base.partial")
+        if fileManager.fileExists(atPath: temporary.path) {
+            try fileManager.removeItem(at: temporary)
+        }
+        defer { try? fileManager.removeItem(at: temporary) }
+        try fileManager.copyItem(at: source, to: temporary)
+        try fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: temporary.path)
+        try fileManager.moveItem(at: temporary, to: destination)
+    }
+
+    private func makeBaseDiskUserEditable(at url: URL) {
+        do {
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        } catch {
+            NSLog("Could not make the base disk editable in Files: %@", error.localizedDescription)
+        }
     }
 
     private var persistedCDImageNames: [String] {
@@ -408,7 +472,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         let save = savesDirectory.appendingPathComponent("win95-base-CDRIVE.sav")
 
         if !identityIsKnown || previousIdentity != identity {
-            let bundledSave = bundledSaveURL(for: disk)
+            let bundledSave = try bundledSaveURL(for: disk, identity: identity)
             if let bundledSave { try validateDiskSave(at: bundledSave) }
             let reason = identityIsKnown ? "previous-base-image" : "unverified-base-image"
             if FileManager.default.fileExists(atPath: save.path) {
@@ -425,22 +489,30 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         defaults.set(baseDiskIdentityVersion, forKey: baseDiskIdentityVersionKey)
     }
 
-    private func bundledSaveURL(for disk: URL) -> URL? {
-        let selectedDisk = disk.standardizedFileURL.resolvingSymlinksInPath()
-        let usesBundledDisk = ["img", "vhd"].contains { ext in
-            guard let bundledDisk = Bundle.main.url(
-                forResource: "win95-base",
-                withExtension: ext,
-                subdirectory: "BundledContent"
-            ) else { return false }
-            return bundledDisk.standardizedFileURL.resolvingSymlinksInPath() == selectedDisk
-        }
-        guard usesBundledDisk else { return nil }
-        return Bundle.main.url(
+    private func bundledSaveURL(for disk: URL, identity: String) throws -> URL? {
+        guard let save = Bundle.main.url(
             forResource: "win95-base-CDRIVE",
             withExtension: "sav",
             subdirectory: "BundledContent"
-        )
+        ), let packagedDiskURL else { return nil }
+
+        let selectedDisk = disk.standardizedFileURL.resolvingSymlinksInPath()
+        let packagedDisk = packagedDiskURL.standardizedFileURL.resolvingSymlinksInPath()
+        if selectedDisk == packagedDisk { return save }
+
+        let expectedCopy = supportDirectory
+            .appendingPathComponent("win95-base")
+            .appendingPathExtension(packagedDiskURL.pathExtension.lowercased())
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        guard selectedDisk == expectedCopy else { return nil }
+
+        // Only pair the packaged overlay with an unchanged Documents copy of
+        // its base disk. A user-replaced image must start with a fresh overlay.
+        guard try sampledIdentity(of: packagedDiskURL) == identity else {
+            return nil
+        }
+        return save
     }
 
     private func validateDiskSave(at url: URL) throws {
@@ -594,7 +666,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             }
             let destination = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(ext)
             try FileManager.default.copyItem(at: source, to: destination)
-            try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: destination.path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: destination.path)
             startVM(disk: destination, CDs: Array(repeating: nil, count: cdDriveCount), restoreSuspendState: false)
         } catch {
             diskSetupView.setBusy(false)
@@ -1523,10 +1595,10 @@ private final class DiskSetupView: UIView {
         onSelectImage?()
     }
 
-    func setBusy(_ busy: Bool) {
+    func setBusy(_ busy: Bool, title: String? = nil) {
         selectButton.isEnabled = !busy
         var configuration = selectButton.configuration
-        configuration?.title = busy ? "イメージを読み込み中…" : "イメージを選択"
+        configuration?.title = busy ? (title ?? "イメージを読み込み中…") : "イメージを選択"
         configuration?.image = busy ? nil : UIImage(systemName: "folder")
         configuration?.showsActivityIndicator = busy
         selectButton.configuration = configuration

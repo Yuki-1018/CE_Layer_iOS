@@ -374,7 +374,7 @@ private final class SharedHTTPConnection {
         <hr><h3>Copy a file from Windows to iPhone/iPad</h3>
         <form method="POST" action="/upload" enctype="multipart/form-data">
         <input type="file" name="file"><input type="submit" value="Upload"></form>
-        <p>Uploaded files appear in Files &gt; On My iPhone/iPad &gt; this app &gt; Win95 &gt; Shared.</p>
+        <p>Uploaded files appear in Files &gt; On My iPhone/iPad &gt; this app &gt; Win9x &gt; Shared.</p>
         </body></html>
         """
         let body = html.data(using: .shiftJIS, allowLossyConversion: true) ?? Data(html.utf8)

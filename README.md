@@ -34,7 +34,7 @@ Windows 95/98/MeはMicrosoftの著作物であり、このリポジトリには�
 
 選択肢は2つです。
 
-1. 初回起動時に表示されるセットアップ画面から `.img` または `.vhd` を Files picker で選ぶ（推奨）。イメージは「このiPhone/iPad内」→アプリ名→`Win95` へコピーされます。後からベースイメージを削除した場合も、次回起動時に同じ画面へ戻ります。
+1. 初回起動時に表示されるセットアップ画面から `.img` または `.vhd` を Files picker で選ぶ（推奨）。イメージは「このiPhone/iPad内」→アプリ名→`Win9x` へコピーされます。後からベースイメージを削除した場合も、次回起動時に同じ画面へ戻ります。
 2. GitHub Actionsの `hdd_image_url` へHTTPSダウンロードURLを指定し、IPAへ直接同梱する。raw IMGとVHDに対応し、`hdd_image_sha256` の指定を推奨します。対応する差分ディスクも同梱する場合は `hdd_save_url` に `win95-base-CDRIVE.sav` のURLを指定します。
 3. 自分専用のprivate fork / local checkoutで `Win95iOS/BundledContent/win95-base.img` または `.vhd` を置いてからビルドする。差分ディスクも仕込む場合は同じ場所へ `win95-base-CDRIVE.sav` という名前で置きます。これらは `.gitignore` 対象なので、誤って公開しないよう注意してください。
 
@@ -64,9 +64,9 @@ scripts/validate_disk.sh path/to/win95-base.img
 - `hdd_save_url`: 任意。`hdd_image_url` のHDDと対になるFFDD v1 `.sav` への直接HTTPS URL。単独では指定できません
 - `hdd_save_sha256`: 任意ですが指定推奨。`.sav` のダウンロード破損や差し替わりを検出します
 
-HDD URLを空欄にすれば従来どおり初回起動時にFiles pickerが表示されます。同梱したベースHDD自体は変更されず、ゲストによる書き込みはDocuments内の差分保存データへ記録されます。`.sav` も指定した場合はFFDDヘッダーとレコード境界を検査し、同梱HDDを初めて使う時だけDocumentsへコピーして、その続きから永続保存します。`.sav` は必ず指定したベースHDDから作られたものを使用してください。完了後、Artifact `Win95iOS-unsigned` からIPAを取得できます。
+HDD URLを空欄にすれば従来どおり初回起動時にFiles pickerが表示されます。同梱したベースHDDは初回起動時にDocumentsへ展開され、「ファイル」Appの「このiPhone/iPad内」→アプリ名→`Win9x` から確認・置換できます。Windowsによる書き込みはDocuments内の差分保存データへ記録され、ベースHDD自体は変更されません。ベースHDDを手動編集・置換するときは、破損を避けるため先にアプリを完全に終了してください。`.sav` も指定した場合はFFDDヘッダーとレコード境界を検査し、同梱HDDを初めて使う時だけDocumentsへコピーして、その続きから永続保存します。`.sav` は必ず指定したベースHDDから作られたものを使用してください。完了後、Artifact `Win95iOS-unsigned` からIPAを取得できます。
 
-同梱HDDはFiles pickerで以前取り込んだHDDより優先して起動します。ベースHDDのサイズと5地点の64 KiBサンプルから識別子を作り、別のWindowsイメージへ変わった場合は旧 `.sav` と一時停止状態を新しいHDDへ適用しません。旧データは `Saves/` 内の `.previous-base-image-*` または初回移行時の `.unverified-base-image-*` へ退避され、削除されません。
+DocumentsにベースHDDがまだない場合だけ同梱HDDを展開するため、「ファイル」Appで置換したイメージが次回起動時に上書きされることはありません。ベースHDDのサイズと5地点の64 KiBサンプルから識別子を作り、別のWindowsイメージへ変わった場合は旧 `.sav` と一時停止状態を新しいHDDへ適用しません。旧データは `Saves/` 内の `.previous-base-image-*` または初回移行時の `.unverified-base-image-*` へ退避され、削除されません。
 
 IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。音声のプリバッファ・アンダーラン復帰、Normal CPU interpreterとセグメント境界キャッシュ、netpacket callbackの登録・開始・停止、FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOの交換・メモリ使用量、D:・E:・F:への3枚同時接続、ドライブ別eject、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
 
@@ -104,7 +104,7 @@ xcodebuild \
 ## ストレージ構造
 
 ```text
-base image (read only)
+base image (VMからはread only、Filesから置換可能)
         │
         ├── unchanged sector ─────────────┐
         │                                 ▼
@@ -114,8 +114,8 @@ base image (read only)
 iOS 側の主な保存先:
 
 ```text
-Files > このiPhone/iPad内 > アプリ名 > Win95/
-├── win95-base.img / .vhd       # Files picker から取り込んだ場合のみ
+Files > このiPhone/iPad内 > アプリ名 > Win9x/
+├── win95-base.img / .vhd       # Files pickerから取り込み、または同梱HDDを初回展開
 ├── CDs/
 │   ├── install-disc-1.iso
 │   └── install-disc-2.iso
@@ -126,7 +126,7 @@ Files > このiPhone/iPad内 > アプリ名 > Win95/
 └── System/
 ```
 
-このフォルダはファイルアプリから参照・編集できます。旧バージョンの `Application Support/Win95` は初回起動時にこの場所へ移動します。アプリ実行中にファイルを置換すると破損する可能性があるため、ベースイメージや保存データを編集するときはアプリを終了してください。
+このフォルダはファイルアプリから参照・編集できます。旧バージョンの `Documents/Win95` と `Application Support/Win95` は初回起動時に `Documents/Win9x` へ移動します。アプリ実行中にファイルを置換すると破損する可能性があるため、ベースイメージや保存データを編集するときはアプリを終了してください。
 
 通常の reset / power cycle でも overlay は維持されます。Windowsの書き込みはbackground移行時と正常終了時にも明示的にflushされます。
 
@@ -155,7 +155,7 @@ bash scripts/test_core_storage.sh
 - 画面を2本指でピンチ: 1〜4倍の範囲でズーム／ズームアウト（指の中心位置を維持）
 - メニューの縮小矢印アイコン: 画面を元の拡大率へ戻す
 - `CD`: UTM風のCD/DVDドライブ管理画面を開く。D:・E:・F:へ異なるCDを最大3枚同時に挿入できます。Filesで選んだイメージはライブラリへ追加されるだけで、自動挿入されません。各ドライブをタップするとCDの選択／交換／取り出し、保存済みイメージをタップすると挿入先ドライブの選択、左スワイプで削除ができます。同じイメージは複数ドライブへ重複挿入できません。
-- `共有`: Filesのファイルを`Win95/Shared`へ追加・共有・削除できます。「Windowsで共有ページを開く」を押すとWin+Rへアドレスを自動入力します。手動の場合はInternet Explorerで`http://10.0.2.2:8080/`を開くと、iOSからのダウンロードとWindowsからのアップロードができます。共有ページは端末内ループバックだけで待ち受け、物理LANには公開しません。
+- `共有`: Filesのファイルを`Win9x/Shared`へ追加・共有・削除できます。「Windowsで共有ページを開く」を押すとWin+Rへアドレスを自動入力します。手動の場合はInternet Explorerで`http://10.0.2.2:8080/`を開くと、iOSからのダウンロードとWindowsからのアップロードができます。共有ページは端末内ループバックだけで待ち受け、物理LANには公開しません。
 - 各ドライブに保存したCD選択を次回起動時に再接続します。ATAPIバックエンドでのマウント中に異常終了した場合は一度だけ全CDを取り出した状態で起動し、選択情報を保持して復旧を案内します。
 - `⏸` / `▶`: Windows の一時停止／再開（現在実行できる操作のアイコンを表示）。一時停止中にアプリを閉じた場合は、次回起動時に保存地点を復元して一時停止画面へ戻ります。
 - 1本指ドラッグ: マウスカーソル移動
