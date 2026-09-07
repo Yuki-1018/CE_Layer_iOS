@@ -248,6 +248,11 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
         if synthesizeShift { sendKey?(RetroKey.leftShift, false) }
     }
 
+    func sendASCIIText(_ string: String) {
+        accessory.releaseModifiers()
+        for byte in string.utf8 where byte < 128 { sendASCII(byte) }
+    }
+
     private func tap(_ key: UInt32) {
         sendKey?(key, true)
         sendKey?(key, false)

@@ -11,6 +11,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private let toolbar = FloatingMenuView()
     private let keyboardCapture = KeyboardCaptureView()
     private let diskSetupView = DiskSetupView()
+    private var sharedServer: SharedFolderServer!
     private lazy var physicalKeyboard = PhysicalKeyboardInput { [weak self] key, pressed in
         self?.bridge.sendKey(key, pressed: pressed)
     }
@@ -19,6 +20,8 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var displayLink: CADisplayLink?
     private var frameGeneration: UInt64 = 0
     private var scrollRemainder: CGFloat = 0
+    private var displayPinchActive = false
+    private var lastDisplayPinchLocation: CGPoint?
     private var touchDragActive = false
     private weak var physicalMouse: GCMouse?
     private var pendingImport: ImportKind = .disk
@@ -31,8 +34,10 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var isChangingCD = false
     private weak var pauseButton: UIButton?
     private weak var cdLibraryController: CDLibraryViewController?
+    private weak var sharedFilesController: SharedFilesViewController?
+    private var sharedServerStatus = "起動中…"
 
-    private enum ImportKind { case disk, cd }
+    private enum ImportKind { case disk, cd, shared }
 
     private lazy var supportDirectory: URL = {
         let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -45,6 +50,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var savesDirectory: URL { supportDirectory.appendingPathComponent("Saves", isDirectory: true) }
     private var systemDirectory: URL { supportDirectory.appendingPathComponent("System", isDirectory: true) }
     private var cdDirectory: URL { supportDirectory.appendingPathComponent("CDs", isDirectory: true) }
+    private var sharedDirectory: URL { supportDirectory.appendingPathComponent("Shared", isDirectory: true) }
     private var suspendStateURL: URL { savesDirectory.appendingPathComponent("automatic-suspend.state") }
     private let selectedCDKey = "SelectedCDImageName"
     private let selectedCDsKey = "SelectedCDImageNamesByDrive"
@@ -70,6 +76,13 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         super.viewDidLoad()
         view.backgroundColor = UIColor(white: 0.04, alpha: 1)
         createDirectories()
+        sharedServer = SharedFolderServer(directory: sharedDirectory)
+        sharedServer.onStatusChanged = { [weak self] status in
+            self?.sharedServerStatus = status
+            self?.refreshSharedFiles(busy: false)
+        }
+        sharedServer.onFilesChanged = { [weak self] in self?.refreshSharedFiles(busy: false) }
+        sharedServer.start()
         bridge = Win95CoreBridge(saveDirectory: savesDirectory, systemDirectory: systemDirectory)
         audio = AudioOutput(bridge: bridge)
         bridge.statusHandler = { [weak self] status in self?.handleCoreStatus(status) }
@@ -87,6 +100,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     deinit {
+        sharedServer?.stop()
         physicalKeyboard.releaseAll()
         detachPhysicalMouse()
         displayLink?.invalidate()
@@ -118,6 +132,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         try? FileManager.default.createDirectory(at: savesDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: cdDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: sharedDirectory, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: suspendStateURL.appendingPathExtension("partial"))
     }
 
@@ -136,6 +151,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         let keyboardSymbol = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
         keyboardButton.setImage(UIImage(systemName: "keyboard", withConfiguration: keyboardSymbol), for: .normal)
         toolbar.addButton("CD", target: self, action: #selector(showCDMenu), hint: "CD images")
+        toolbar.addButton("共有", target: self, action: #selector(showSharedFiles), hint: "Windowsとのファイル共有")
+        let resetZoomButton = toolbar.addButton("", target: self, action: #selector(resetDisplayZoom), hint: "画面を元の拡大率に戻す")
+        resetZoomButton.setImage(UIImage(systemName: "arrow.down.right.and.arrow.up.left"), for: .normal)
         pauseButton = toolbar.addButton("", target: self, action: #selector(togglePause), hint: "Pause")
         updatePauseButton()
         toolbar.addButton("↻", target: self, action: #selector(resetVM), hint: "Reset")
@@ -199,11 +217,19 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         toolbarVisibilityTap.delegate = self
         displayView.addGestureRecognizer(toolbarVisibilityTap)
 
+        let displayPinch = UIPinchGestureRecognizer(target: self, action: #selector(zoomDisplay(_:)))
+        displayPinch.delegate = self
+        displayView.addGestureRecognizer(displayPinch)
+
         let pausedToolbarVisibilityTap = UITapGestureRecognizer(target: self, action: #selector(toggleToolbarVisibility(_:)))
         pausedToolbarVisibilityTap.numberOfTouchesRequired = 3
         pausedToolbarVisibilityTap.allowedTouchTypes = directTouchTypes
         pausedToolbarVisibilityTap.delegate = self
         pauseOverlay.addGestureRecognizer(pausedToolbarVisibilityTap)
+
+        let pausedDisplayPinch = UIPinchGestureRecognizer(target: self, action: #selector(zoomDisplay(_:)))
+        pausedDisplayPinch.delegate = self
+        pauseOverlay.addGestureRecognizer(pausedDisplayPinch)
 
         let touchScroll = UIPanGestureRecognizer(target: self, action: #selector(scrollMouse(_:)))
         touchScroll.minimumNumberOfTouches = 2
@@ -517,6 +543,14 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         presenter.present(picker, animated: true)
     }
 
+    private func presentSharedFilePicker(from presenter: UIViewController) {
+        pendingImport = .shared
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: false)
+        picker.delegate = self
+        picker.allowsMultipleSelection = true
+        presenter.present(picker, animated: true)
+    }
+
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         switch pendingImport {
         case .disk:
@@ -545,6 +579,8 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             }
         case .cd:
             importCDImages(urls)
+        case .shared:
+            importSharedFiles(urls)
         }
     }
 
@@ -588,7 +624,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                             userInfo: [NSLocalizedDescriptionKey: "対応形式は ISO・CUE・CHD・IMG です。"]
                         )
                     }
-                    let destination = self.uniqueCDDestination(for: source, in: destinationDirectory)
+                    let destination = self.uniqueDestination(for: source, in: destinationDirectory)
                     try self.copyLargeFile(from: source, to: destination)
                     importedImages.append(destination)
                 } catch {
@@ -613,7 +649,40 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         }
     }
 
-    private func copyLargeFile(from source: URL, to destination: URL) throws {
+    private func importSharedFiles(_ sources: [URL]) {
+        guard !sources.isEmpty else { return }
+        toolbar.showActivity(true)
+        refreshSharedFiles(busy: true)
+        let destinationDirectory = sharedDirectory
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            var failures: [String] = []
+            for source in sources {
+                do {
+                    let destination = self.uniqueDestination(for: source, in: destinationDirectory)
+                    try self.copyLargeFile(from: source, to: destination, validateISOImage: false)
+                } catch {
+                    failures.append("\(source.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+            DispatchQueue.main.async {
+                self.toolbar.showActivity(false)
+                self.refreshSharedFiles(busy: false)
+                if !failures.isEmpty {
+                    let details = failures.prefix(4).joined(separator: "\n")
+                    let remaining = failures.count - min(failures.count, 4)
+                    let suffix = remaining > 0 ? "\nほか \(remaining) 件" : ""
+                    self.showError(NSError(
+                        domain: "Win95UI",
+                        code: 11,
+                        userInfo: [NSLocalizedDescriptionKey: "一部の共有ファイルを追加できませんでした。\n\(details)\(suffix)"]
+                    ))
+                }
+            }
+        }
+    }
+
+    private func copyLargeFile(from source: URL, to destination: URL, validateISOImage: Bool = true) throws {
         let accessed = source.startAccessingSecurityScopedResource()
         defer { if accessed { source.stopAccessingSecurityScopedResource() } }
 
@@ -621,30 +690,30 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         var copyError: Error?
         let coordinator = NSFileCoordinator(filePresenter: nil)
         coordinator.coordinate(readingItemAt: source, options: .withoutChanges, error: &coordinationError) { coordinatedURL in
-            do { try streamCopy(from: coordinatedURL, to: destination) }
+            do { try streamCopy(from: coordinatedURL, to: destination, validateISOImage: validateISOImage) }
             catch { copyError = error }
         }
         if let coordinationError { throw coordinationError }
         if let copyError { throw copyError }
     }
 
-    private func streamCopy(from source: URL, to destination: URL) throws {
+    private func streamCopy(from source: URL, to destination: URL, validateISOImage: Bool) throws {
         let fileManager = FileManager.default
         let sourceSize = Int64(try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-        let volumeValues = try cdDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        let volumeValues = try destination.deletingLastPathComponent().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         if let available = volumeValues.volumeAvailableCapacityForImportantUsage,
            available < sourceSize + 64 * 1024 * 1024 {
             throw NSError(
                 domain: "Win95UI",
                 code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "CDイメージを保存する空き容量が不足しています。"]
+                userInfo: [NSLocalizedDescriptionKey: "ファイルを保存する空き容量が不足しています。"]
             )
         }
 
         let partial = destination.appendingPathExtension("partial")
         if fileManager.fileExists(atPath: partial.path) { try fileManager.removeItem(at: partial) }
         guard fileManager.createFile(atPath: partial.path, contents: nil) else {
-            throw NSError(domain: "Win95UI", code: 4, userInfo: [NSLocalizedDescriptionKey: "CDイメージの保存先を作成できません。"])
+            throw NSError(domain: "Win95UI", code: 4, userInfo: [NSLocalizedDescriptionKey: "ファイルの保存先を作成できません。"])
         }
 
         do {
@@ -664,10 +733,10 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 throw NSError(
                     domain: "Win95UI",
                     code: 5,
-                    userInfo: [NSLocalizedDescriptionKey: "CDイメージを最後まで読み込めませんでした。"]
+                    userInfo: [NSLocalizedDescriptionKey: "ファイルを最後まで読み込めませんでした。"]
                 )
             }
-            if destination.pathExtension.lowercased() == "iso" { try validateISO(at: partial) }
+            if validateISOImage && destination.pathExtension.lowercased() == "iso" { try validateISO(at: partial) }
             try fileManager.moveItem(at: partial, to: destination)
             var resourceValues = URLResourceValues()
             resourceValues.isExcludedFromBackup = true
@@ -720,6 +789,113 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         present(navigation, animated: true)
     }
 
+    @objc private func showSharedFiles() {
+        sharedServer.start()
+        if let existing = sharedFilesController {
+            existing.reload(files: storedSharedFiles, serverStatus: sharedServerStatus, busy: false)
+            return
+        }
+
+        let controller = SharedFilesViewController(files: storedSharedFiles, serverStatus: sharedServerStatus)
+        controller.onAdd = { [weak self, weak controller] in
+            guard let self, let controller else { return }
+            self.presentSharedFilePicker(from: controller)
+        }
+        controller.onOpenInWindows = { [weak self] in
+            self?.dismiss(animated: true) { [weak self] in self?.openSharedPageInWindows() }
+        }
+        controller.onShare = { [weak self] url, source in self?.shareSharedFile(url, source: source) }
+        controller.onDelete = { [weak self] url in self?.confirmDeleteSharedFile(url) }
+        controller.onDismiss = { [weak self] in self?.dismiss(animated: true) }
+        sharedFilesController = controller
+
+        let navigation = UINavigationController(rootViewController: controller)
+        navigation.modalPresentationStyle = .formSheet
+        present(navigation, animated: true)
+    }
+
+    private func openSharedPageInWindows() {
+        guard sharedServerStatus == "使用できます" else {
+            showError(NSError(
+                domain: "Win95UI",
+                code: 13,
+                userInfo: [NSLocalizedDescriptionKey: "共有サーバーの準備ができていません。共有画面の状態を確認してから、もう一度実行してください。"]
+            ))
+            return
+        }
+        guard bridge.isRunning, !bridge.isPaused else {
+            showError(NSError(
+                domain: "Win95UI",
+                code: 12,
+                userInfo: [NSLocalizedDescriptionKey: "Windowsを起動し、一時停止を解除してから実行してください。"]
+            ))
+            return
+        }
+        keyboardCapture.releaseModifiers()
+        physicalKeyboard.releaseAll()
+        bridge.sendKey(RetroKey.leftSuper, pressed: true)
+        bridge.sendKey(114, pressed: true) // R
+        bridge.sendKey(114, pressed: false)
+        bridge.sendKey(RetroKey.leftSuper, pressed: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self, self.bridge.isRunning, !self.bridge.isPaused else { return }
+            self.keyboardCapture.sendASCIIText(SharedFolderServer.guestURL)
+            self.bridge.sendKey(RetroKey.enter, pressed: true)
+            self.bridge.sendKey(RetroKey.enter, pressed: false)
+        }
+    }
+
+    private var storedSharedFiles: [URL] {
+        let keys: [URLResourceKey] = [.isRegularFileKey]
+        return ((try? FileManager.default.contentsOfDirectory(
+            at: sharedDirectory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        )) ?? []).filter {
+            (try? $0.resourceValues(forKeys: Set(keys)).isRegularFile) == true
+        }.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+    }
+
+    private func refreshSharedFiles(busy: Bool) {
+        sharedFilesController?.reload(files: storedSharedFiles, serverStatus: sharedServerStatus, busy: busy)
+    }
+
+    private func shareSharedFile(_ url: URL, source: UIView?) {
+        guard FileManager.default.fileExists(atPath: url.path), let presenter = sharedFilesController else { return }
+        let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = source ?? presenter.view
+            popover.sourceRect = source?.bounds ?? CGRect(
+                x: presenter.view.bounds.midX,
+                y: presenter.view.bounds.midY,
+                width: 1,
+                height: 1
+            )
+        }
+        presenter.present(activity, animated: true)
+    }
+
+    private func confirmDeleteSharedFile(_ url: URL) {
+        guard let presenter = sharedFilesController else { return }
+        let alert = UIAlertController(
+            title: "共有ファイルを削除しますか？",
+            message: url.lastPathComponent,
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "キャンセル", style: .cancel))
+        alert.addAction(UIAlertAction(title: "削除", style: .destructive) { [weak self] _ in
+            do {
+                try FileManager.default.removeItem(at: url)
+                self?.refreshSharedFiles(busy: false)
+            } catch {
+                self?.showError(error)
+            }
+        })
+        presenter.present(alert, animated: true)
+    }
+
     private func refreshCDLibrary(busy: Bool) {
         let images = storedCDImages
         persistCDImageOrder(images)
@@ -759,9 +935,8 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         ["iso", "cue", "chd", "img"].contains(url.pathExtension.lowercased())
     }
 
-    private func uniqueCDDestination(for source: URL, in directory: URL? = nil) -> URL {
+    private func uniqueDestination(for source: URL, in directory: URL) -> URL {
         let fileManager = FileManager.default
-        let directory = directory ?? cdDirectory
         let ext = source.pathExtension
         let base = source.deletingPathExtension().lastPathComponent
         var destination = directory.appendingPathComponent(source.lastPathComponent)
@@ -943,6 +1118,11 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     @objc private func scrollMouse(_ recognizer: UIPanGestureRecognizer) {
+        if displayPinchActive {
+            recognizer.setTranslation(.zero, in: displayView)
+            scrollRemainder = 0
+            return
+        }
         let translation = recognizer.translation(in: displayView)
         recognizer.setTranslation(.zero, in: displayView)
         scrollRemainder += translation.y
@@ -960,8 +1140,42 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
         let pair = [gestureRecognizer, otherGestureRecognizer]
+        if pair.contains(where: { $0 is UIPinchGestureRecognizer }) &&
+            pair.contains(where: { $0 is UIPanGestureRecognizer && ($0 as? UIPanGestureRecognizer)?.maximumNumberOfTouches == 2 }) {
+            return true
+        }
         return pair.contains { $0 is UILongPressGestureRecognizer } &&
             pair.contains { $0 is UIPanGestureRecognizer && ($0 as? UIPanGestureRecognizer)?.maximumNumberOfTouches == 1 }
+    }
+
+    @objc private func zoomDisplay(_ recognizer: UIPinchGestureRecognizer) {
+        let location = recognizer.location(in: displayView)
+        switch recognizer.state {
+        case .began:
+            displayPinchActive = true
+            lastDisplayPinchLocation = location
+            displayView.adjustZoom(by: recognizer.scale, around: location)
+            recognizer.scale = 1
+        case .changed:
+            displayPinchActive = true
+            displayView.adjustZoom(by: recognizer.scale, around: location)
+            if let previous = lastDisplayPinchLocation {
+                displayView.panZoom(by: CGPoint(x: location.x - previous.x, y: location.y - previous.y))
+            }
+            lastDisplayPinchLocation = location
+            recognizer.scale = 1
+        case .ended, .cancelled, .failed:
+            displayPinchActive = false
+            lastDisplayPinchLocation = nil
+            scrollRemainder = 0
+        default:
+            break
+        }
+    }
+
+    @objc private func resetDisplayZoom() {
+        displayView.resetZoom()
+        UISelectionFeedbackGenerator().selectionChanged()
     }
 
     func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
@@ -1101,7 +1315,10 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             updatePausedAppearance(saving: false)
         }
     }
-    @objc private func appDidBecomeActive() { becomeFirstResponder() }
+    @objc private func appDidBecomeActive() {
+        becomeFirstResponder()
+        refreshSharedFiles(busy: false)
+    }
 
     private func handleCoreStatus(_ status: String) {
         if status == "Running" || status == "Paused" { updatePauseButton() }

@@ -26,6 +26,7 @@
 		A10000000000000000000018 /* glib-2.0.0.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000017 /* glib-2.0.0.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		A10000000000000000000019 /* iconv.2.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000018 /* iconv.2.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		A10000000000000000000020 /* intl.8.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000019 /* intl.8.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		A10000000000000000000021 /* SharedFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000021 /* SharedFiles.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -66,6 +67,7 @@
 		B10000000000000000000018 /* iconv.2.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = Vendor/UTMFrameworks/iconv.2.framework; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000019 /* intl.8.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = Vendor/UTMFrameworks/intl.8.framework; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000020 /* SlirpBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SlirpBridge.h; sourceTree = "<group>"; };
+		B10000000000000000000021 /* SharedFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedFiles.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -106,6 +108,7 @@
 			children = (
 				B10000000000000000000001 /* AppDelegate.swift */,
 				B10000000000000000000002 /* VMViewController.swift */,
+				B10000000000000000000021 /* SharedFiles.swift */,
 				D10000000000000000000003 /* Bridge */,
 				D10000000000000000000004 /* Display */,
 				D10000000000000000000005 /* Audio */,
@@ -209,6 +212,7 @@
 				A10000000000000000000005 /* AudioOutput.swift in Sources */,
 				A10000000000000000000006 /* KeyboardInput.swift in Sources */,
 				A10000000000000000000007 /* CoreBridge.mm in Sources */,
+				A10000000000000000000021 /* SharedFiles.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

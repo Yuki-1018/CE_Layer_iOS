@@ -40,7 +40,7 @@
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Windows 9xからローカルネットワーク上のサーバーへ接続するために使用します。</string>
+    <string>Windows 9xの仮想ネットワークとiOSの共有フォルダ間でファイルを転送するために使用します。</string>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationLandscapeLeft</string>

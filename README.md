@@ -16,12 +16,13 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - Metal による XRGB8888 framebuffer 表示
 - AVAudioEngine による 48 kHz stereo PCM出力（固定長リングバッファ、起動・アンダーラン時のプリバッファとクリック抑制フェード）
 - NE2000からlibslirpへ接続するDHCP/DNS付きuser-mode NAT
-- アスペクト比を維持する全画面 Metal 表示（iPhone、iPad、AirPlay ミラーリング対応）
+- アスペクト比を維持する全画面 Metal 表示（iPhone、iPad、AirPlay ミラーリング対応、ピンチで1〜4倍ズーム）
 - 画面内を移動できる折りたたみ式コンパクト操作メニュー（3本指タップで表示／非表示）
 - タッチトラックパッド、長押しドラッグ、2本指右クリック／スクロール
 - iOS ソフトウェアキーボード、GameController HID 経由のUSB/Bluetooth物理キーボード、外部マウス／トラックパッド
 - UTM 型の特殊キーバー（Win/Ctrl/Alt/Shiftと文字・特殊キーの同時押し、Esc、Tab、矢印、F1〜F12、編集・ロックキー）
 - 複数 ISO/CUE/CHD/IMG の保存、D:・E:・F:への最大3枚同時mount、ドライブ別の交換・eject・削除（ストリーミング取込、起動・リセット時の再接続）
+- Filesから見える`Shared`フォルダと、Windows 9xのInternet Explorerから双方向転送できる端末内HTTPファイルページ
 - 別アイコンで判別できる pause/resume、一時停止状態の自動保存・次回復帰、hardware reset
 - Windows の正常な shutdown を検出したら DOSBox Pure のメニューを出さずアプリを終了
 - background 移行時と正常終了時の HDD overlay flush
@@ -118,6 +119,7 @@ Files > このiPhone/iPad内 > アプリ名 > Win95/
 ├── CDs/
 │   ├── install-disc-1.iso
 │   └── install-disc-2.iso
+├── Shared/                       # iOS・Windows間の共有ファイル
 ├── Saves/
 │   ├── win95-base-CDRIVE.sav   # 変更 sector のみ
 │   └── automatic-suspend.state # 一時停止中だけ保持する自動復帰状態
@@ -150,7 +152,10 @@ bash scripts/test_core_storage.sh
 - エミュレーター画面を3本指でタップ: コンパクトメニューを表示／非表示
 - キーボードアイコン: ソフトウェアキーボードを表示／非表示
 - 特殊キーバーの Win/Ctrl/Alt/Shift: 選択後に文字または特殊キーを押すと同時押しとして送信
+- 画面を2本指でピンチ: 1〜4倍の範囲でズーム／ズームアウト（指の中心位置を維持）
+- メニューの縮小矢印アイコン: 画面を元の拡大率へ戻す
 - `CD`: UTM風のCD/DVDドライブ管理画面を開く。D:・E:・F:へ異なるCDを最大3枚同時に挿入できます。Filesで選んだイメージはライブラリへ追加されるだけで、自動挿入されません。各ドライブをタップするとCDの選択／交換／取り出し、保存済みイメージをタップすると挿入先ドライブの選択、左スワイプで削除ができます。同じイメージは複数ドライブへ重複挿入できません。
+- `共有`: Filesのファイルを`Win95/Shared`へ追加・共有・削除できます。「Windowsで共有ページを開く」を押すとWin+Rへアドレスを自動入力します。手動の場合はInternet Explorerで`http://10.0.2.2:8080/`を開くと、iOSからのダウンロードとWindowsからのアップロードができます。共有ページは端末内ループバックだけで待ち受け、物理LANには公開しません。
 - 各ドライブに保存したCD選択を次回起動時に再接続します。ATAPIバックエンドでのマウント中に異常終了した場合は一度だけ全CDを取り出した状態で起動し、選択情報を保持して復旧を案内します。
 - `⏸` / `▶`: Windows の一時停止／再開（現在実行できる操作のアイコンを表示）。一時停止中にアプリを閉じた場合は、次回起動時に保存地点を復元して一時停止画面へ戻ります。
 - 1本指ドラッグ: マウスカーソル移動
