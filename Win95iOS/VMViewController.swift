@@ -826,8 +826,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             self.refreshCDLibrary(busy: false)
             if continueAfterChange { afterChange?() }
         }
-        if let CD { bridge.mountCD(at: CD, driveIndex: driveIndex, completion: completion) }
-        else { bridge.ejectCD(at: driveIndex, completion: completion) }
+        let bridgeDriveIndex = UInt(driveIndex)
+        if let CD { bridge.mountCD(at: CD, driveIndex: bridgeDriveIndex, completion: completion) }
+        else { bridge.ejectCD(at: bridgeDriveIndex, completion: completion) }
     }
 
     private func confirmDeleteCD(_ url: URL) {
