@@ -24,7 +24,6 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var pendingImport: ImportKind = .disk
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var activeCDURLs: [URL?] = Array(repeating: nil, count: 3)
-    private var pendingCDImportDriveIndex: Int?
     private var activeDiskURL: URL?
     private var manuallyPaused = false
     private var resumeAfterForeground = false
@@ -58,6 +57,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private let baseDiskIdentityVersionKey = "BaseDiskSampleIdentityVersion"
     private let baseDiskIdentityVersion = 1
     private let cdDriveCount = 3
+    private let cdDriveLetters = ["D", "E", "F"]
     private var recoveredFromInterruptedCDMount = false
     private var importedDiskURL: URL? {
         for ext in ["img", "vhd"] {
@@ -256,12 +256,27 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     private var persistedCDImageNames: [String] {
         let defaults = UserDefaults.standard
-        if let names = defaults.stringArray(forKey: selectedCDsKey) {
-            return Array((names + Array(repeating: "", count: cdDriveCount)).prefix(cdDriveCount))
+        var needsSave = false
+        var names: [String]
+        if let savedNames = defaults.stringArray(forKey: selectedCDsKey) {
+            names = Array((savedNames + Array(repeating: "", count: cdDriveCount)).prefix(cdDriveCount))
+            needsSave = savedNames.count != cdDriveCount
+        } else {
+            names = Array(repeating: "", count: cdDriveCount)
         }
-        var names = Array(repeating: "", count: cdDriveCount)
-        if let legacy = defaults.string(forKey: selectedCDKey) {
+        if defaults.object(forKey: selectedCDsKey) == nil,
+           let legacy = defaults.string(forKey: selectedCDKey) {
             names[0] = legacy
+            needsSave = true
+        }
+        var seen = Set<String>()
+        for index in names.indices where !names[index].isEmpty {
+            if !seen.insert(names[index]).inserted {
+                names[index] = ""
+                needsSave = true
+            }
+        }
+        if needsSave {
             defaults.set(names, forKey: selectedCDsKey)
             defaults.removeObject(forKey: selectedCDKey)
             defaults.synchronize()
@@ -494,9 +509,8 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         present(picker, animated: true)
     }
 
-    private func presentCDPicker(from presenter: UIViewController, targetDriveIndex: Int? = nil) {
+    private func presentCDPicker(from presenter: UIViewController) {
         pendingImport = .cd
-        pendingCDImportDriveIndex = targetDriveIndex
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.isoImage, .data], asCopy: false)
         picker.delegate = self
         picker.allowsMultipleSelection = true
@@ -530,9 +544,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 showError(error)
             }
         case .cd:
-            let targetDriveIndex = pendingCDImportDriveIndex
-            pendingCDImportDriveIndex = nil
-            importCDImages(urls, targetDriveIndex: targetDriveIndex)
+            importCDImages(urls)
         }
     }
 
@@ -556,10 +568,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         if pendingImport == .disk { diskSetupView.setBusy(false) }
-        if pendingImport == .cd { pendingCDImportDriveIndex = nil }
     }
 
-    private func importCDImages(_ sources: [URL], targetDriveIndex: Int?) {
+    private func importCDImages(_ sources: [URL]) {
         guard !sources.isEmpty else { return }
         toolbar.showActivity(true)
         refreshCDLibrary(busy: true)
@@ -570,9 +581,16 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             var failures: [String] = []
             for source in sources {
                 do {
+                    guard self.isMountableCD(source) else {
+                        throw NSError(
+                            domain: "Win95UI",
+                            code: 5,
+                            userInfo: [NSLocalizedDescriptionKey: "対応形式は ISO・CUE・CHD・IMG です。"]
+                        )
+                    }
                     let destination = self.uniqueCDDestination(for: source, in: destinationDirectory)
                     try self.copyLargeFile(from: source, to: destination)
-                    if self.isMountableCD(destination) { importedImages.append(destination) }
+                    importedImages.append(destination)
                 } catch {
                     failures.append("\(source.lastPathComponent): \(error.localizedDescription)")
                 }
@@ -581,14 +599,6 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 self.appendToCDImageOrder(importedImages)
                 self.toolbar.showActivity(false)
                 self.refreshCDLibrary(busy: false)
-                let assignments: [(URL, Int)]
-                if let targetDriveIndex, let firstMountable = importedImages.first {
-                    assignments = [(firstMountable, targetDriveIndex)]
-                } else {
-                    let emptyDrives = self.activeCDURLs.indices.filter { self.activeCDURLs[$0] == nil }
-                    assignments = Array(zip(importedImages, emptyDrives))
-                }
-                self.mountImportedCDs(assignments[...])
                 if !failures.isEmpty {
                     let details = failures.prefix(4).joined(separator: "\n")
                     let remaining = failures.count - min(failures.count, 4)
@@ -695,9 +705,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         }
 
         let library = CDLibraryViewController(images: storedCDImages, activeURLs: activeCDURLs)
-        library.onAdd = { [weak self, weak library] driveIndex in
+        library.onAdd = { [weak self, weak library] in
             guard let self, let library else { return }
-            self.presentCDPicker(from: library, targetDriveIndex: driveIndex)
+            self.presentCDPicker(from: library)
         }
         library.onMount = { [weak self] url, driveIndex in self?.mountCD(url, driveIndex: driveIndex) }
         library.onEject = { [weak self] driveIndex in self?.ejectCD(driveIndex: driveIndex) }
@@ -766,18 +776,21 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     private func mountCD(_ url: URL, driveIndex: Int) {
         guard activeCDURLs.indices.contains(driveIndex) else { return }
+        if let mountedDrive = activeCDURLs.indices.first(where: {
+            $0 != driveIndex && activeCDURLs[$0] == url
+        }) {
+            showError(NSError(
+                domain: "Win95UI",
+                code: 10,
+                userInfo: [NSLocalizedDescriptionKey: "このCDはすでに\(cdDriveLetters[mountedDrive]):ドライブに挿入されています。別のドライブへ挿入する場合は、先に\(cdDriveLetters[mountedDrive]):ドライブから取り出してください。"]
+            ))
+            return
+        }
         if url.pathExtension.lowercased() == "iso" {
             do { try validateISO(at: url) }
             catch { showError(error); return }
         }
         changeCD(to: url, driveIndex: driveIndex)
-    }
-
-    private func mountImportedCDs(_ assignments: ArraySlice<(URL, Int)>) {
-        guard let (url, driveIndex) = assignments.first else { return }
-        changeCD(to: url, driveIndex: driveIndex) { [weak self] in
-            self?.mountImportedCDs(assignments.dropFirst())
-        }
     }
 
     private func ejectCD(driveIndex: Int) {
@@ -1152,7 +1165,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     private func showError(_ error: Error) {
-        let alert = UIAlertController(title: "Error", message: error.localizedDescription, preferredStyle: .alert)
+        let alert = UIAlertController(title: "エラー", message: error.localizedDescription, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         var presenter: UIViewController = self
         while let presented = presenter.presentedViewController, !presented.isBeingDismissed {
@@ -1348,7 +1361,7 @@ private final class PauseOverlayView: UIView {
 }
 
 private final class CDLibraryViewController: UITableViewController {
-    var onAdd: ((Int?) -> Void)?
+    var onAdd: (() -> Void)?
     var onMount: ((URL, Int) -> Void)?
     var onEject: ((Int) -> Void)?
     var onDelete: ((URL) -> Void)?
@@ -1413,9 +1426,9 @@ private final class CDLibraryViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         if section == 0 {
-            return "D:・E:・F:へ最大3枚を同時に挿入できます。ドライブをタップすると、そのドライブのCDを変更または取り出せます。"
+            return "D:・E:・F:へ異なるCDを最大3枚同時に挿入できます。ドライブをタップすると、そのドライブのCDを変更または取り出せます。"
         }
-        return "複数枚をまとめて追加できます。イメージをタップすると挿入先のドライブを選べます。"
+        return "Filesで選んだだけではドライブに挿入されません。追加したイメージをタップし、挿入先を選んでください。"
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -1434,8 +1447,8 @@ private final class CDLibraryViewController: UITableViewController {
         }
 
         if indexPath.row == 0 {
-            cell.textLabel?.text = "CDイメージを追加…"
-            cell.detailTextLabel?.text = "複数のISOなどをまとめて選べます"
+            cell.textLabel?.text = "ライブラリへCDイメージを追加…"
+            cell.detailTextLabel?.text = "追加後にドライブを選んで挿入します"
             cell.textLabel?.textColor = view.tintColor
             cell.imageView?.image = UIImage(systemName: "doc.badge.plus")
             return cell
@@ -1457,8 +1470,10 @@ private final class CDLibraryViewController: UITableViewController {
                 : "\(mountedLetters.joined(separator: ", ")) に挿入中"
         }
         cell.imageView?.image = UIImage(systemName: mountedLetters.isEmpty ? "opticaldisc" : "opticaldisc.fill")
-        cell.accessoryType = .disclosureIndicator
-        cell.accessibilityHint = "ダブルタップして挿入先のドライブを選びます"
+        cell.accessoryType = mountedLetters.isEmpty ? .disclosureIndicator : .checkmark
+        cell.accessibilityHint = mountedLetters.isEmpty
+            ? "ダブルタップして挿入先のドライブを選びます"
+            : "ダブルタップして挿入中のドライブを確認します"
         return cell
     }
 
@@ -1468,9 +1483,14 @@ private final class CDLibraryViewController: UITableViewController {
         if indexPath.section == 0 {
             presentDriveMenu(driveIndex: indexPath.row, source: tableView.cellForRow(at: indexPath))
         } else if indexPath.row == 0 {
-            onAdd?(nil)
+            onAdd?()
         } else {
-            presentDestinationMenu(for: images[indexPath.row - 1], source: tableView.cellForRow(at: indexPath))
+            let image = images[indexPath.row - 1]
+            if let mountedDrive = activeURLs.firstIndex(of: image) {
+                presentMountedImageMenu(image, driveIndex: mountedDrive, source: tableView.cellForRow(at: indexPath))
+            } else {
+                presentDestinationMenu(for: image, source: tableView.cellForRow(at: indexPath))
+            }
         }
     }
 
@@ -1498,14 +1518,16 @@ private final class CDLibraryViewController: UITableViewController {
             preferredStyle: .actionSheet
         )
         for image in images {
-            let action = UIAlertAction(title: image.lastPathComponent, style: .default) { [weak self] _ in
+            let mountedDrive = activeURLs.firstIndex(of: image)
+            let mountedSuffix = mountedDrive.map { "（\(driveLetters[$0]):に挿入中）" } ?? ""
+            let action = UIAlertAction(title: "\(image.lastPathComponent)\(mountedSuffix)", style: .default) { [weak self] _ in
                 self?.onMount?(image, driveIndex)
             }
-            action.isEnabled = activeURLs[driveIndex] != image
+            action.isEnabled = mountedDrive == nil
             alert.addAction(action)
         }
-        alert.addAction(UIAlertAction(title: "新しいCDイメージを追加…", style: .default) { [weak self] _ in
-            self?.onAdd?(driveIndex)
+        alert.addAction(UIAlertAction(title: "ライブラリへCDイメージを追加…", style: .default) { [weak self] _ in
+            self?.onAdd?()
         })
         if activeURLs[driveIndex] != nil {
             alert.addAction(UIAlertAction(title: "このドライブから取り出す", style: .destructive) { [weak self] _ in
@@ -1518,15 +1540,24 @@ private final class CDLibraryViewController: UITableViewController {
     }
 
     private func presentDestinationMenu(for image: URL, source: UIView?) {
+        if let mountedDrive = activeURLs.firstIndex(of: image) {
+            presentMountedImageMenu(image, driveIndex: mountedDrive, source: source)
+            return
+        }
         let alert = UIAlertController(
             title: "挿入先を選択",
             message: image.lastPathComponent,
             preferredStyle: .actionSheet
         )
         for driveIndex in activeURLs.indices {
-            let currentName = activeURLs[driveIndex]?.lastPathComponent ?? "空"
+            let destinationDescription: String
+            if let currentName = activeURLs[driveIndex]?.lastPathComponent {
+                destinationDescription = "\(currentName) と交換"
+            } else {
+                destinationDescription = "空 — ここへ挿入"
+            }
             let action = UIAlertAction(
-                title: "\(driveLetters[driveIndex]):（\(currentName)）",
+                title: "\(driveLetters[driveIndex]):（\(destinationDescription)）",
                 style: .default
             ) { [weak self] _ in
                 self?.onMount?(image, driveIndex)
@@ -1535,6 +1566,21 @@ private final class CDLibraryViewController: UITableViewController {
             alert.addAction(action)
         }
         alert.addAction(UIAlertAction(title: "キャンセル", style: .cancel))
+        configurePopover(for: alert, source: source)
+        present(alert, animated: true)
+    }
+
+    private func presentMountedImageMenu(_ image: URL, driveIndex: Int, source: UIView?) {
+        let letter = driveLetters[driveIndex]
+        let alert = UIAlertController(
+            title: "\(letter):ドライブに挿入中",
+            message: "同じCDイメージを複数のドライブへ同時に挿入することはできません。\n\(image.lastPathComponent)",
+            preferredStyle: .actionSheet
+        )
+        alert.addAction(UIAlertAction(title: "\(letter):ドライブから取り出す", style: .destructive) { [weak self] _ in
+            self?.onEject?(driveIndex)
+        })
+        alert.addAction(UIAlertAction(title: "閉じる", style: .cancel))
         configurePopover(for: alert, source: source)
         present(alert, animated: true)
     }
