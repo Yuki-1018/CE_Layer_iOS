@@ -929,7 +929,21 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     @objc private func resetVM() {
-        guard bridge.isRunning else { return }
+        guard bridge.isRunning, !isChangingCD, presentedViewController == nil else { return }
+        let alert = UIAlertController(
+            title: "Windowsを強制再起動しますか？",
+            message: "保存していないWindows上の作業は失われる可能性があります。",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "キャンセル", style: .cancel))
+        alert.addAction(UIAlertAction(title: "再起動", style: .destructive) { [weak self] _ in
+            self?.performResetVM()
+        })
+        present(alert, animated: true)
+    }
+
+    private func performResetVM() {
+        guard bridge.isRunning, !isChangingCD else { return }
         manuallyPaused = false
         resumeAfterForeground = false
         discardAutomaticSuspendState()
@@ -1538,7 +1552,7 @@ private final class FloatingMenuView: UIView {
         expandedWidth = max(menuHeight, min(availableWidth, menuHeight + controlsWidth))
         let targetWidth = isCollapsed ? menuHeight : expandedWidth
         if bounds.size != CGSize(width: targetWidth, height: menuHeight) {
-            bounds.size = CGSize(width: targetWidth, height: menuHeight)
+            setWidthPreservingHandle(targetWidth)
         }
         if !hasInitialPosition {
             let savedX = UserDefaults.standard.double(forKey: "FloatingMenuX")
@@ -1577,9 +1591,11 @@ private final class FloatingMenuView: UIView {
         handleButton.setImage(UIImage(systemName: isCollapsed ? "line.3.horizontal" : "chevron.left"), for: .normal)
         handleButton.accessibilityLabel = isCollapsed ? "Open controls" : "Collapse controls"
         UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .curveEaseInOut]) {
-            self.bounds.size.width = width
+            self.setWidthPreservingHandle(width)
             if let superview = self.superview { self.clampToVisibleArea(in: superview) }
             self.layoutIfNeeded()
+        } completion: { [weak self] _ in
+            self?.savePosition()
         }
     }
 
@@ -1590,9 +1606,28 @@ private final class FloatingMenuView: UIView {
         recognizer.setTranslation(.zero, in: superview)
         clampToVisibleArea(in: superview)
         if recognizer.state == .ended || recognizer.state == .cancelled {
-            UserDefaults.standard.set(center.x / max(1, superview.bounds.width), forKey: "FloatingMenuX")
-            UserDefaults.standard.set(center.y / max(1, superview.bounds.height), forKey: "FloatingMenuY")
+            savePosition()
         }
+    }
+
+    private func setWidthPreservingHandle(_ width: CGFloat) {
+        let widthChange = width - bounds.width
+        guard widthChange != 0 else { return }
+        bounds.size.width = width
+        // Keep the drag handle fixed on screen. Growing a left-opening menu
+        // moves its center left; a right-opening menu moves its center right.
+        center.x += (opensToLeft ? -widthChange : widthChange) / 2
+    }
+
+    private func savePosition() {
+        guard let superview else { return }
+        layoutIfNeeded()
+        let handleCenter = convert(
+            CGPoint(x: handleButton.frame.midX, y: handleButton.frame.midY),
+            to: superview
+        )
+        UserDefaults.standard.set(handleCenter.x / max(1, superview.bounds.width), forKey: "FloatingMenuX")
+        UserDefaults.standard.set(handleCenter.y / max(1, superview.bounds.height), forKey: "FloatingMenuY")
     }
 
     private func clampToVisibleArea(in superview: UIView) {
