@@ -27,7 +27,7 @@ extern "C" void dbp_win95_flush_disk(void);
 extern "C" bool dbp_win95_guest_shutdown(void);
 extern "C" void dbp_win95_send_key(unsigned keycode, bool pressed);
 extern "C" void dbp_win95_release_input(void);
-extern "C" int dbp_win95_change_cd(const char* path);
+extern "C" int dbp_win95_change_cd(unsigned driveIndex, const char* path);
 extern "C" bool dbp_win95_disk_ready(void);
 extern "C" void dbp_win95_set_nat_active(bool active);
 
@@ -58,6 +58,7 @@ struct Operation {
     PendingOperation kind = PendingOperation::None;
     std::string path;
     Win95Completion completion = nil;
+    unsigned driveIndex = 0;
 };
 
 struct NetworkTimer {
@@ -478,14 +479,14 @@ static int NetworkGetPollEvents(int index, void *opaque) {
     [self enqueueOperation:Operation{PendingOperation::Flush, {}, [completion copy]}];
 }
 
-- (void)mountCDAtURL:(NSURL *)url completion:(Win95Completion)completion {
+- (void)mountCDAtURL:(NSURL *)url driveIndex:(NSUInteger)driveIndex completion:(Win95Completion)completion {
     if (!_running.load()) { [self finishOperation:completion error:CoreError(8, @"The virtual machine is not running.")]; return; }
-    [self enqueueOperation:Operation{PendingOperation::MountCD, url.fileSystemRepresentation, [completion copy]}];
+    [self enqueueOperation:Operation{PendingOperation::MountCD, url.fileSystemRepresentation, [completion copy], (unsigned)driveIndex}];
 }
 
-- (void)ejectCDWithCompletion:(Win95Completion)completion {
+- (void)ejectCDAtDriveIndex:(NSUInteger)driveIndex completion:(Win95Completion)completion {
     if (!_running.load()) { [self finishOperation:completion error:CoreError(8, @"The virtual machine is not running.")]; return; }
-    [self enqueueOperation:Operation{PendingOperation::EjectCD, {}, [completion copy]}];
+    [self enqueueOperation:Operation{PendingOperation::EjectCD, {}, [completion copy], (unsigned)driveIndex}];
 }
 
 - (void)saveSuspendStateToURL:(NSURL *)url completion:(Win95Completion)completion {
@@ -530,7 +531,7 @@ static int NetworkGetPollEvents(int index, void *opaque) {
                     break;
                 }
                 const char *path = operation.kind == PendingOperation::MountCD ? operation.path.c_str() : nullptr;
-                const int result = dbp_win95_change_cd(path);
+                const int result = dbp_win95_change_cd(operation.driveIndex, path);
                 if (result == 2) {
                     error = CoreError(6, @"CD-ROMの初期化がまだ完了していません。");
                 } else if (result != 1) {

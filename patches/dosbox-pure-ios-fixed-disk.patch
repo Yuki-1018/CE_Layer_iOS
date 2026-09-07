@@ -125,15 +125,15 @@ index ec99bf3..b898680 100644
  		input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)));
  }
  
-+int IDE_Win95ChangeCD(const char*);
++int IDE_Win95ChangeCD(Bit8u driveIndex, const char*);
 +bool IDE_Win95Ready();
 +
-+extern "C" int dbp_win95_change_cd(const char* path)
++extern "C" int dbp_win95_change_cd(unsigned driveIndex, const char* path)
 +{
 +	if (dbp_state == DBPSTATE_BOOT) return 2;
 +	if (dbp_state == DBPSTATE_SHUTDOWN || dbp_state == DBPSTATE_EXITED) return 0;
 +	DBP_ThreadControl(TCM_PAUSE_FRAME);
-+	const int result = IDE_Win95ChangeCD(path);
++	const int result = IDE_Win95ChangeCD((Bit8u)driveIndex, path);
 +	DBP_ThreadControl(TCM_RESUME_FRAME);
 +	return result;
 +}
@@ -809,51 +809,72 @@ index d0cbbe3..684fc4c 100644
  #if !C_MMX
  	const char* cputype_values[] = { "auto", "386", "386_slow", "486_slow", "pentium_slow", "386_prefetch", 0};
 diff --git a/src/hardware/ide.cpp b/src/hardware/ide.cpp
-index 4618145..78a81e7 100644
+index 4618145..812b68d 100644
 --- a/src/hardware/ide.cpp
 +++ b/src/hardware/ide.cpp
-@@ -2923,6 +2923,13 @@ static void ide_baseio_w(Bitu port,Bitu val,Bitu iolen) {
+@@ -2923,9 +2923,18 @@ static void ide_baseio_w(Bitu port,Bitu val,Bitu iolen) {
  	}
  }
  
 +// Owned by the fixed-machine frontend, independently of DOS/MSCDEX drives.
-+static CDROM_Interface_Image* win95_cdrom = NULL;
++static const Bit8u WIN95_MAX_CDROMS = 3;
++static CDROM_Interface_Image* win95_cdroms[WIN95_MAX_CDROMS] = {};
 +static bool win95_cdrom_controlled = false;
-+static std::string win95_cdrom_path;
-+int IDE_Win95ChangeCD(const char* path);
-+void IDE_Win95ForgetCD() { win95_cdrom_path.clear(); }
++static std::string win95_cdrom_paths[WIN95_MAX_CDROMS];
++int IDE_Win95ChangeCD(Bit8u driveIndex, const char* path);
++void IDE_Win95ForgetCD() { for (std::string& path : win95_cdrom_paths) path.clear(); }
 +
  void IDE_RefreshCDROMs()
  {
  	if (!idecontroller[0]) return; // IDE_SetupControllers not yet called
-@@ -2935,7 +2942,9 @@ void IDE_RefreshCDROMs()
++	Bit8u frontendCDIndex = 0;
+ 	for (Bit8u i = 0, dosDriveIndex = (Bit8u)('D'-'A'); i != MAX_IDE_CONTROLLERS*2; i++)
+ 	{
+ 		IDEController* c = idecontroller[i>>1];
+@@ -2935,7 +2944,9 @@ void IDE_RefreshCDROMs()
  		if (!d || d->type != IDE_TYPE_CDROM) continue;
  
  		CDROM_Interface* cdrom;
 -		if (d->DOSDriveIndex >= dosDriveIndex)
 +		if (win95_cdrom_controlled)
-+			cdrom = win95_cdrom;
++			cdrom = (frontendCDIndex < WIN95_MAX_CDROMS ? win95_cdroms[frontendCDIndex++] : NULL);
 +		else if (d->DOSDriveIndex >= dosDriveIndex)
  		{
  			DOS_Drive* drive = Drives[(dosDriveIndex = d->DOSDriveIndex)++];
  			cdrom = (drive && dynamic_cast<isoDrive*>(drive) ? ((isoDrive*)drive)->GetInterface() : NULL);
-@@ -2994,12 +3003,51 @@ void IDE_SetupControllers(bool alwaysHaveCDROM)
+@@ -2976,7 +2987,12 @@ void IDE_SetupControllers(bool alwaysHaveCDROM)
+ 
+ 	Bit8u numCDROMDevices = 0;
+ 	for (DOS_Drive* drv : Drives) { if (drv && dynamic_cast<isoDrive*>(drv)) { numCDROMDevices++; } }
+-	if (!numCDROMDevices && alwaysHaveCDROM) numCDROMDevices = 1; // Enforce CD-ROM so discs can be mounted afterwards
++	if (alwaysHaveCDROM)
++	{
++		numCDROMDevices = 0;
++		for (Bit8u i = 0; i != MAX_IDE_CONTROLLERS*2 && numCDROMDevices != WIN95_MAX_CDROMS; i++)
++			if (!imageDiskList[i+2]) numCDROMDevices++;
++	}
+ 
+ 	for (Bit8u i = 0; i != MAX_IDE_CONTROLLERS; i++)
+ 		idecontroller[i] = new IDEController(i);
+@@ -2994,12 +3010,56 @@ void IDE_SetupControllers(bool alwaysHaveCDROM)
  	}
  
  	IDE_RefreshCDROMs();
-+	if (!win95_cdrom_path.empty()) IDE_Win95ChangeCD(win95_cdrom_path.c_str());
++	for (Bit8u i = 0; i != WIN95_MAX_CDROMS; i++)
++		if (!win95_cdrom_paths[i].empty()) IDE_Win95ChangeCD(i, win95_cdrom_paths[i].c_str());
 +}
 +
 +// Called with the emulation thread parked. Do not construct an isoDrive here:
 +// MSCDEX and DOS media-table writes are not safe in a booted protected-mode OS.
 +bool IDE_Win95Ready() { return idecontroller[0] != NULL; }
 +
-+int IDE_Win95ChangeCD(const char* path)
++int IDE_Win95ChangeCD(Bit8u driveIndex, const char* path)
 +{
 +	if (!idecontroller[0]) return 2; // frontend retries after the boot frame
++	if (driveIndex >= WIN95_MAX_CDROMS) return 0;
 +
 +	CDROM_Interface_Image* replacement = NULL;
-+	const Bit8u slot = 25; // outside the DOS CD units used by this fixed machine
++	const Bit8u slot = 25 - driveIndex; // outside the DOS CD units used by this fixed machine
 +	if (path && *path)
 +	{
 +		replacement = new CDROM_Interface_Image(slot);
@@ -861,20 +882,20 @@ index 4618145..78a81e7 100644
 +		if (!replacement->SetDevice(filename.data(), 0))
 +		{
 +			delete replacement;
-+			CDROM_Interface_Image::images[slot] = win95_cdrom;
++			CDROM_Interface_Image::images[slot] = win95_cdroms[driveIndex];
 +			return 0;
 +		}
 +	}
 +
-+	CDROM_Interface_Image* old = win95_cdrom;
++	CDROM_Interface_Image* old = win95_cdroms[driveIndex];
 +	win95_cdrom_controlled = true;
-+	win95_cdrom = NULL;
++	win95_cdroms[driveIndex] = NULL;
 +	IDE_RefreshCDROMs(); // detach first, including on disc-to-disc replacement
 +	delete old;
-+	win95_cdrom = replacement;
++	win95_cdroms[driveIndex] = replacement;
 +	CDROM_Interface_Image::images[slot] = replacement;
 +	IDE_RefreshCDROMs();
-+	win95_cdrom_path = (path ? path : "");
++	win95_cdrom_paths[driveIndex] = (path ? path : "");
 +	return 1;
  }
  
@@ -882,9 +903,12 @@ index 4618145..78a81e7 100644
  {
  	for (IDEController*& c : idecontroller)
  		if (c) { delete c; c = NULL; }
-+	delete win95_cdrom;
-+	win95_cdrom = NULL;
-+	if (win95_cdrom_controlled) CDROM_Interface_Image::images[25] = NULL;
++	for (Bit8u i = 0; i != WIN95_MAX_CDROMS; i++)
++	{
++		delete win95_cdroms[i];
++		win95_cdroms[i] = NULL;
++		if (win95_cdrom_controlled) CDROM_Interface_Image::images[25-i] = NULL;
++	}
 +	win95_cdrom_controlled = false;
  }
  

@@ -21,7 +21,7 @@
 #include <unistd.h>
 
 extern "C" bool dbp_win95_disk_ready();
-extern "C" int dbp_win95_change_cd(const char*);
+extern "C" int dbp_win95_change_cd(unsigned, const char*);
 extern "C" void dbp_win95_flush_disk();
 extern "C" void dbp_win95_set_nat_active(bool);
 const char* DBP_CPU_GetDecoderName();
@@ -216,6 +216,8 @@ int main(int argc, char** argv) {
         writeFile(directory + "/disc.iso", iso);
         std::fill(iso.begin() + 20 * 2048, iso.begin() + 21 * 2048, 0x6B);
         writeFile(directory + "/disc-2.iso", iso);
+        std::fill(iso.begin() + 20 * 2048, iso.begin() + 21 * 2048, 0x7C);
+        writeFile(directory + "/disc-3.iso", iso);
         writeFile(directory + "/invalid.iso", std::vector<unsigned char>(1200 * 1024));
         FILE* largeISO = fopen((directory + "/disc.iso").c_str(), "rb+"); check(largeISO != nullptr, "large ISO open");
         check(ftruncate(fileno(largeISO), 512 * 1024 * 1024) == 0, "sparse 512 MiB ISO"); fclose(largeISO);
@@ -224,34 +226,49 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 12; ++i) {
             const bool secondDisc = i & 1;
             const std::string discPath = directory + (secondDisc ? "/disc-2.iso" : "/disc.iso");
-            check(dbp_win95_change_cd(discPath.c_str()) == 1, "live multi-disc insert/swap");
+            check(dbp_win95_change_cd(0, discPath.c_str()) == 1, "live multi-disc insert/swap");
             auto cd = CDROM_Interface_Image::images[25]; check(cd != nullptr, "CD owned by IDE frontend");
             std::array<unsigned char, 2048> data; check(cd->ReadSector(data.data(), false, 20), "CD sector read");
             for (auto byte : data) check(byte == (secondDisc ? 0x6B : 0x5A), "swapped CD content");
-            check(dbp_win95_change_cd((directory + "/absent.iso").c_str()) == 0, "invalid ISO rejected");
+            check(dbp_win95_change_cd(0, (directory + "/absent.iso").c_str()) == 0, "invalid ISO rejected");
             check(CDROM_Interface_Image::images[25] == cd, "failed replacement preserves current media");
-            check(dbp_win95_change_cd((directory + "/invalid.iso").c_str()) == 0, "malformed small ISO rejected");
+            check(dbp_win95_change_cd(0, (directory + "/invalid.iso").c_str()) == 0, "malformed small ISO rejected");
             check(CDROM_Interface_Image::images[25] == cd, "malformed replacement preserves media");
             check(imageDiskList[2] == bootDisk, "CD operation must not replace HDD");
-            check(dbp_win95_change_cd(nullptr) == 1, "live eject"); retro_run();
+            check(dbp_win95_change_cd(0, nullptr) == 1, "live eject"); retro_run();
         }
         rusage afterCD = {}; getrusage(RUSAGE_SELF, &afterCD);
 #if defined(__linux__)
         check(afterCD.ru_maxrss - beforeCD.ru_maxrss < 64 * 1024, "512 MiB ISO must not be loaded wholesale into RAM");
 #endif
-        check(dbp_win95_change_cd((directory + "/disc.iso").c_str()) == 1, "insert before reset");
+        check(dbp_win95_change_cd(0, (directory + "/disc.iso").c_str()) == 1, "insert D drive");
+        check(dbp_win95_change_cd(1, (directory + "/disc-2.iso").c_str()) == 1, "insert E drive");
+        check(dbp_win95_change_cd(2, (directory + "/disc-3.iso").c_str()) == 1, "insert F drive");
+        check(CDROM_Interface_Image::images[25] && CDROM_Interface_Image::images[24] && CDROM_Interface_Image::images[23],
+              "three simultaneous ATAPI media interfaces");
+        std::array<unsigned char, 2048> simultaneousCD;
+        check(CDROM_Interface_Image::images[25]->ReadSector(simultaneousCD.data(), false, 20) && simultaneousCD[0] == 0x5A,
+              "D drive content readable");
+        check(CDROM_Interface_Image::images[24]->ReadSector(simultaneousCD.data(), false, 20) && simultaneousCD[0] == 0x6B,
+              "E drive content readable");
+        check(CDROM_Interface_Image::images[23]->ReadSector(simultaneousCD.data(), false, 20) && simultaneousCD[0] == 0x7C,
+              "F drive content readable");
+        check(dbp_win95_change_cd(1, nullptr) == 1 && !CDROM_Interface_Image::images[24], "eject E independently");
+        check(CDROM_Interface_Image::images[25] && CDROM_Interface_Image::images[23], "eject keeps other drives mounted");
+        check(dbp_win95_change_cd(1, (directory + "/disc-2.iso").c_str()) == 1, "reinsert E before reset");
         const size_t stateSize = retro_serialize_size(); check(stateSize != 0, "suspend size");
         std::vector<unsigned char> snapshot(stateSize);
         check(retro_serialize(snapshot.data(), snapshot.size()), "save with CD mounted");
         retro_reset();
         for (int i = 0; i < 60; ++i) retro_run();
-        check(dbp_win95_disk_ready() && CDROM_Interface_Image::images[25], "CD reattached after reset");
+        check(dbp_win95_disk_ready() && CDROM_Interface_Image::images[25] && CDROM_Interface_Image::images[24] && CDROM_Interface_Image::images[23],
+              "three CDs reattached after reset");
         check(retro_unserialize(snapshot.data(), snapshot.size()), "restore with CD mounted");
         std::array<unsigned char, 2048> restoredCD;
         check(CDROM_Interface_Image::images[25]->ReadSector(restoredCD.data(), false, 20) && restoredCD[0] == 0x5A, "CD readable after suspend restore");
         netpacket.poll(); netpacket.stop(); dbp_win95_set_nat_active(false);
         dbp_win95_flush_disk(); retro_unload_game(); retro_deinit();
-        puts("PASS: audio buffering, Win9x segment-limit compatibility, networking, storage recovery and repeated multi-disc live swap/eject");
+        puts("PASS: audio buffering, Win9x segment-limit compatibility, networking, storage recovery and three-drive CD mount/swap/eject");
         return 0;
     } catch (const std::exception& e) { fprintf(stderr, "FAIL: %s\n", e.what()); std::_Exit(1); }
 }

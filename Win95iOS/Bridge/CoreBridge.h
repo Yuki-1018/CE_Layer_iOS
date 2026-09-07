@@ -31,8 +31,8 @@ typedef void (^Win95Completion)(NSError * _Nullable error);
 - (void)reset;
 - (void)flushDisk;
 - (void)flushDiskWithCompletion:(Win95Completion)completion NS_SWIFT_NAME(flushDisk(completion:));
-- (void)mountCDAtURL:(NSURL *)url completion:(Win95Completion)completion NS_SWIFT_NAME(mountCD(at:completion:));
-- (void)ejectCDWithCompletion:(Win95Completion)completion NS_SWIFT_NAME(ejectCD(completion:));
+- (void)mountCDAtURL:(NSURL *)url driveIndex:(NSUInteger)driveIndex completion:(Win95Completion)completion NS_SWIFT_NAME(mountCD(at:driveIndex:completion:));
+- (void)ejectCDAtDriveIndex:(NSUInteger)driveIndex completion:(Win95Completion)completion NS_SWIFT_NAME(ejectCD(at:completion:));
 
 - (void)saveSuspendStateToURL:(NSURL *)url completion:(Win95Completion)completion NS_SWIFT_NAME(saveSuspendState(to:completion:));
 - (void)loadSuspendStateFromURL:(NSURL *)url completion:(Win95Completion)completion NS_SWIFT_NAME(loadSuspendState(from:completion:));

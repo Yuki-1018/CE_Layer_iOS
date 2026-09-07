@@ -23,7 +23,8 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private weak var physicalMouse: GCMouse?
     private var pendingImport: ImportKind = .disk
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
-    private var activeCDURL: URL?
+    private var activeCDURLs: [URL?] = Array(repeating: nil, count: 3)
+    private var pendingCDImportDriveIndex: Int?
     private var activeDiskURL: URL?
     private var manuallyPaused = false
     private var resumeAfterForeground = false
@@ -47,14 +48,16 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var cdDirectory: URL { supportDirectory.appendingPathComponent("CDs", isDirectory: true) }
     private var suspendStateURL: URL { savesDirectory.appendingPathComponent("automatic-suspend.state") }
     private let selectedCDKey = "SelectedCDImageName"
+    private let selectedCDsKey = "SelectedCDImageNamesByDrive"
     private let cdImageOrderKey = "CDImageOrder"
     private let cdMountInProgressKey = "CDMountInProgress"
     private let cdMountStateVersionKey = "CDMountStateVersion"
     private let suspendCompatibilityKey = "SuspendStorageBackendVersion"
-    private let suspendCompatibilityVersion = 6
+    private let suspendCompatibilityVersion = 7
     private let baseDiskIdentityKey = "BaseDiskSampleIdentity"
     private let baseDiskIdentityVersionKey = "BaseDiskSampleIdentityVersion"
     private let baseDiskIdentityVersion = 1
+    private let cdDriveCount = 3
     private var recoveredFromInterruptedCDMount = false
     private var importedDiskURL: URL? {
         for ext in ["img", "vhd"] {
@@ -190,6 +193,18 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         displayView.addGestureRecognizer(rightTap)
         tap.require(toFail: rightTap)
 
+        let toolbarVisibilityTap = UITapGestureRecognizer(target: self, action: #selector(toggleToolbarVisibility(_:)))
+        toolbarVisibilityTap.numberOfTouchesRequired = 3
+        toolbarVisibilityTap.allowedTouchTypes = directTouchTypes
+        toolbarVisibilityTap.delegate = self
+        displayView.addGestureRecognizer(toolbarVisibilityTap)
+
+        let pausedToolbarVisibilityTap = UITapGestureRecognizer(target: self, action: #selector(toggleToolbarVisibility(_:)))
+        pausedToolbarVisibilityTap.numberOfTouchesRequired = 3
+        pausedToolbarVisibilityTap.allowedTouchTypes = directTouchTypes
+        pausedToolbarVisibilityTap.delegate = self
+        pauseOverlay.addGestureRecognizer(pausedToolbarVisibilityTap)
+
         let touchScroll = UIPanGestureRecognizer(target: self, action: #selector(scrollMouse(_:)))
         touchScroll.minimumNumberOfTouches = 2
         touchScroll.maximumNumberOfTouches = 2
@@ -228,18 +243,33 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     private func startBundledOrImportedDisk() {
-        let initialCD = recoverablePersistedCDURL
+        let initialCDs = recoverablePersistedCDURLs
         for ext in ["img", "vhd"] {
             if let bundled = Bundle.main.url(forResource: "win95-base", withExtension: ext, subdirectory: "BundledContent") {
-                startVM(disk: bundled, CD: initialCD)
+                startVM(disk: bundled, CDs: initialCDs)
                 return
             }
         }
-        if let importedDiskURL { startVM(disk: importedDiskURL, CD: initialCD); return }
+        if let importedDiskURL { startVM(disk: importedDiskURL, CDs: initialCDs); return }
         showMissingDisk()
     }
 
-    private var recoverablePersistedCDURL: URL? {
+    private var persistedCDImageNames: [String] {
+        let defaults = UserDefaults.standard
+        if let names = defaults.stringArray(forKey: selectedCDsKey) {
+            return Array((names + Array(repeating: "", count: cdDriveCount)).prefix(cdDriveCount))
+        }
+        var names = Array(repeating: "", count: cdDriveCount)
+        if let legacy = defaults.string(forKey: selectedCDKey) {
+            names[0] = legacy
+            defaults.set(names, forKey: selectedCDsKey)
+            defaults.removeObject(forKey: selectedCDKey)
+            defaults.synchronize()
+        }
+        return names
+    }
+
+    private var recoverablePersistedCDURLs: [URL?] {
         let defaults = UserDefaults.standard
         // Retry selections from the old DOS mount backend using the new ATAPI
         // backend. Only an interrupted operation on this backend gets a safe boot.
@@ -247,19 +277,21 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             defaults.removeObject(forKey: cdMountInProgressKey)
             defaults.synchronize()
             recoveredFromInterruptedCDMount = true
-            return nil
+            return Array(repeating: nil, count: cdDriveCount)
         }
-        guard let name = defaults.string(forKey: selectedCDKey),
-              !name.contains("/"), !name.contains("\\") else { return nil }
-        let url = cdDirectory.appendingPathComponent(name)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        return persistedCDImageNames.map { name in
+            guard !name.isEmpty, !name.contains("/"), !name.contains("\\") else { return nil }
+            let url = cdDirectory.appendingPathComponent(name)
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        }
     }
 
-    private func startVM(disk: URL, CD: URL?, restoreSuspendState: Bool = true) {
+    private func startVM(disk: URL, CDs: [URL?], restoreSuspendState: Bool = true) {
         do {
             try preserveIncompatibleSuspendState()
             try prepareStorageForBaseDisk(disk)
-            if CD == nil, UserDefaults.standard.string(forKey: selectedCDKey) != nil {
+            let requestedNames = persistedCDImageNames.filter { !$0.isEmpty }
+            if CDs.compactMap({ $0 }).count < requestedNames.count {
                 try archiveSuspendState(reason: "media-unavailable")
             }
             let save = savesDirectory.appendingPathComponent("win95-base-CDRIVE.sav")
@@ -272,7 +304,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             }
         } catch { diskSetupView.setBusy(false); showError(error); return }
         activeDiskURL = disk
-        activeCDURL = nil
+        activeCDURLs = Array(repeating: nil, count: cdDriveCount)
         bridge.start(diskURL: disk) { [weak self] error in
             guard let self else { return }
             self.toolbar.showActivity(false)
@@ -291,12 +323,22 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                     self.startAudioIfNeeded()
                 }
             }
-            if let CD {
-                // Restore ATAPI state only after its media has been attached.
-                self.changeCD(to: CD, automatic: true, afterChange: finishStartup)
-                return
+            // Restore all ATAPI media before loading a suspend state that can
+            // contain requests in flight for D:, E: or F:.
+            func restoreCD(at driveIndex: Int) {
+                guard driveIndex < self.cdDriveCount else {
+                    finishStartup()
+                    return
+                }
+                guard CDs.indices.contains(driveIndex), let CD = CDs[driveIndex] else {
+                    restoreCD(at: driveIndex + 1)
+                    return
+                }
+                self.changeCD(to: CD, driveIndex: driveIndex, automatic: true) {
+                    restoreCD(at: driveIndex + 1)
+                }
             }
-            finishStartup()
+            restoreCD(at: 0)
             if self.recoveredFromInterruptedCDMount {
                 self.recoveredFromInterruptedCDMount = false
                 self.showError(NSError(
@@ -311,9 +353,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private func preserveIncompatibleSuspendState() throws {
         let defaults = UserDefaults.standard
         guard defaults.integer(forKey: suspendCompatibilityKey) < suspendCompatibilityVersion else { return }
-        // Preserve states created before the corrected VM86 segment-cache
-        // initialization; resuming one can return directly to its old #GP loop.
-        try archiveSuspendState(reason: "previous-cpu-segment-cache")
+        // Preserve states created before the corrected VM86 segment-cache or
+        // the three-drive IDE topology; both change serialized core state.
+        try archiveSuspendState(reason: "previous-core-topology")
         defaults.set(suspendCompatibilityVersion, forKey: suspendCompatibilityKey)
     }
 
@@ -452,8 +494,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         present(picker, animated: true)
     }
 
-    private func presentCDPicker(from presenter: UIViewController) {
+    private func presentCDPicker(from presenter: UIViewController, targetDriveIndex: Int? = nil) {
         pendingImport = .cd
+        pendingCDImportDriveIndex = targetDriveIndex
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.isoImage, .data], asCopy: false)
         picker.delegate = self
         picker.allowsMultipleSelection = true
@@ -487,7 +530,9 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
                 showError(error)
             }
         case .cd:
-            importCDImages(urls)
+            let targetDriveIndex = pendingCDImportDriveIndex
+            pendingCDImportDriveIndex = nil
+            importCDImages(urls, targetDriveIndex: targetDriveIndex)
         }
     }
 
@@ -502,7 +547,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             let destination = supportDirectory.appendingPathComponent("win95-base").appendingPathExtension(ext)
             try FileManager.default.copyItem(at: source, to: destination)
             try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: destination.path)
-            startVM(disk: destination, CD: nil, restoreSuspendState: false)
+            startVM(disk: destination, CDs: Array(repeating: nil, count: cdDriveCount), restoreSuspendState: false)
         } catch {
             diskSetupView.setBusy(false)
             showError(error)
@@ -511,35 +556,48 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         if pendingImport == .disk { diskSetupView.setBusy(false) }
+        if pendingImport == .cd { pendingCDImportDriveIndex = nil }
     }
 
-    private func importCDImages(_ sources: [URL]) {
+    private func importCDImages(_ sources: [URL], targetDriveIndex: Int?) {
         guard !sources.isEmpty else { return }
         toolbar.showActivity(true)
         refreshCDLibrary(busy: true)
         let destinationDirectory = cdDirectory
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            do {
-                var importedImages: [URL] = []
-                for source in sources {
+            var importedImages: [URL] = []
+            var failures: [String] = []
+            for source in sources {
+                do {
                     let destination = self.uniqueCDDestination(for: source, in: destinationDirectory)
                     try self.copyLargeFile(from: source, to: destination)
                     if self.isMountableCD(destination) { importedImages.append(destination) }
+                } catch {
+                    failures.append("\(source.lastPathComponent): \(error.localizedDescription)")
                 }
-                DispatchQueue.main.async {
-                    self.appendToCDImageOrder(importedImages)
-                    self.toolbar.showActivity(false)
-                    self.refreshCDLibrary(busy: false)
-                    if self.activeCDURL == nil, let firstMountable = importedImages.first {
-                        self.mountCD(firstMountable)
-                    }
+            }
+            DispatchQueue.main.async {
+                self.appendToCDImageOrder(importedImages)
+                self.toolbar.showActivity(false)
+                self.refreshCDLibrary(busy: false)
+                let assignments: [(URL, Int)]
+                if let targetDriveIndex, let firstMountable = importedImages.first {
+                    assignments = [(firstMountable, targetDriveIndex)]
+                } else {
+                    let emptyDrives = self.activeCDURLs.indices.filter { self.activeCDURLs[$0] == nil }
+                    assignments = Array(zip(importedImages, emptyDrives))
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    self.toolbar.showActivity(false)
-                    self.refreshCDLibrary(busy: false)
-                    self.showError(error)
+                self.mountImportedCDs(assignments[...])
+                if !failures.isEmpty {
+                    let details = failures.prefix(4).joined(separator: "\n")
+                    let remaining = failures.count - min(failures.count, 4)
+                    let suffix = remaining > 0 ? "\nほか \(remaining) 件" : ""
+                    self.showError(NSError(
+                        domain: "Win95UI",
+                        code: 7,
+                        userInfo: [NSLocalizedDescriptionKey: "一部のCDイメージを追加できませんでした。\n\(details)\(suffix)"]
+                    ))
                 }
             }
         }
@@ -632,23 +690,18 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     @objc private func showCDMenu() {
         if let existing = cdLibraryController {
-            existing.reload(images: storedCDImages, activeURL: activeCDURL, busy: false)
+            existing.reload(images: storedCDImages, activeURLs: activeCDURLs, busy: false)
             return
         }
 
-        let library = CDLibraryViewController(images: storedCDImages, activeURL: activeCDURL)
-        library.onAdd = { [weak self, weak library] in
+        let library = CDLibraryViewController(images: storedCDImages, activeURLs: activeCDURLs)
+        library.onAdd = { [weak self, weak library] driveIndex in
             guard let self, let library else { return }
-            self.presentCDPicker(from: library)
+            self.presentCDPicker(from: library, targetDriveIndex: driveIndex)
         }
-        library.onMount = { [weak self] url in self?.mountCD(url) }
-        library.onPrevious = { [weak self] in self?.changeCDBy(offset: -1) }
-        library.onNext = { [weak self] in self?.changeCDBy(offset: 1) }
-        library.onEject = { [weak self] in self?.ejectCD() }
+        library.onMount = { [weak self] url, driveIndex in self?.mountCD(url, driveIndex: driveIndex) }
+        library.onEject = { [weak self] driveIndex in self?.ejectCD(driveIndex: driveIndex) }
         library.onDelete = { [weak self] url in self?.confirmDeleteCD(url) }
-        library.onReorder = { [weak self] images in
-            self?.persistCDImageOrder(images)
-        }
         library.onDismiss = { [weak self] in self?.dismiss(animated: true) }
         cdLibraryController = library
 
@@ -660,7 +713,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private func refreshCDLibrary(busy: Bool) {
         let images = storedCDImages
         persistCDImageOrder(images)
-        cdLibraryController?.reload(images: images, activeURL: activeCDURL, busy: busy)
+        cdLibraryController?.reload(images: images, activeURLs: activeCDURLs, busy: busy)
     }
 
     private var storedCDImages: [URL] {
@@ -711,28 +764,29 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         return destination
     }
 
-    private func mountCD(_ url: URL) {
+    private func mountCD(_ url: URL, driveIndex: Int) {
+        guard activeCDURLs.indices.contains(driveIndex) else { return }
         if url.pathExtension.lowercased() == "iso" {
             do { try validateISO(at: url) }
             catch { showError(error); return }
         }
-        changeCD(to: url)
+        changeCD(to: url, driveIndex: driveIndex)
     }
 
-    private func ejectCD() {
-        changeCD(to: nil)
+    private func mountImportedCDs(_ assignments: ArraySlice<(URL, Int)>) {
+        guard let (url, driveIndex) = assignments.first else { return }
+        changeCD(to: url, driveIndex: driveIndex) { [weak self] in
+            self?.mountImportedCDs(assignments.dropFirst())
+        }
     }
 
-    private func changeCDBy(offset: Int) {
-        guard !isChangingCD, let activeCDURL else { return }
-        let images = storedCDImages
-        guard let current = images.firstIndex(of: activeCDURL) else { return }
-        let destination = current + offset
-        guard images.indices.contains(destination) else { return }
-        mountCD(images[destination])
+    private func ejectCD(driveIndex: Int) {
+        guard activeCDURLs.indices.contains(driveIndex) else { return }
+        changeCD(to: nil, driveIndex: driveIndex)
     }
 
-    private func changeCD(to CD: URL?, automatic: Bool = false, afterChange: (() -> Void)? = nil) {
+    private func changeCD(to CD: URL?, driveIndex: Int, automatic: Bool = false, afterChange: (() -> Void)? = nil) {
+        guard activeCDURLs.indices.contains(driveIndex) else { return }
         guard !isChangingCD, bridge.isRunning else { return }
         isChangingCD = true
         refreshCDLibrary(busy: true)
@@ -748,29 +802,32 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             defaults.synchronize()
             self.isChangingCD = false
             self.toolbar.showActivity(false)
+            var continueAfterChange = false
             if let error {
                 if automatic {
                     // Preserve the library selection so a temporary file error
                     // does not silently forget the user's CD on the next launch.
                     do { try self.archiveSuspendState(reason: "media-unavailable") }
                     catch { self.showError(error) }
-                    self.startAudioIfNeeded()
+                    continueAfterChange = true
                 }
                 self.showError(error)
             } else {
-                self.activeCDURL = CD
-                if let CD {
-                    defaults.set(CD.lastPathComponent, forKey: self.selectedCDKey)
-                    defaults.set(3, forKey: self.cdMountStateVersionKey)
+                self.activeCDURLs[driveIndex] = CD
+                if !automatic {
+                    let names = self.activeCDURLs.map { $0?.lastPathComponent ?? "" }
+                    defaults.set(names, forKey: self.selectedCDsKey)
+                    defaults.removeObject(forKey: self.selectedCDKey)
                 }
-                else { defaults.removeObject(forKey: self.selectedCDKey) }
+                defaults.set(3, forKey: self.cdMountStateVersionKey)
                 defaults.synchronize()
-                afterChange?()
+                continueAfterChange = true
             }
             self.refreshCDLibrary(busy: false)
+            if continueAfterChange { afterChange?() }
         }
-        if let CD { bridge.mountCD(at: CD, completion: completion) }
-        else { bridge.ejectCD(completion: completion) }
+        if let CD { bridge.mountCD(at: CD, driveIndex: driveIndex, completion: completion) }
+        else { bridge.ejectCD(at: driveIndex, completion: completion) }
     }
 
     private func confirmDeleteCD(_ url: URL) {
@@ -794,12 +851,26 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
             do {
                 try FileManager.default.removeItem(at: url)
                 self.persistCDImageOrder(self.storedCDImages.filter { $0 != url })
+                let defaults = UserDefaults.standard
+                let names = self.persistedCDImageNames.map { $0 == url.lastPathComponent ? "" : $0 }
+                defaults.set(names, forKey: self.selectedCDsKey)
+                defaults.synchronize()
             }
             catch { self.showError(error) }
             self.refreshCDLibrary(busy: false)
         }
-        guard activeCDURL == url else { removeFile(); return }
-        changeCD(to: nil, afterChange: removeFile)
+        let mountedDriveIndices = activeCDURLs.indices.filter { activeCDURLs[$0] == url }
+        ejectCDs(at: mountedDriveIndices[...], completion: removeFile)
+    }
+
+    private func ejectCDs(at driveIndices: ArraySlice<Int>, completion: @escaping () -> Void) {
+        guard let driveIndex = driveIndices.first else {
+            completion()
+            return
+        }
+        changeCD(to: nil, driveIndex: driveIndex) { [weak self] in
+            self?.ejectCDs(at: driveIndices.dropFirst(), completion: completion)
+        }
     }
 
     @objc private func showKeyboard() {
@@ -831,6 +902,30 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     @objc private func twoFingerRightClick(_ recognizer: UITapGestureRecognizer) {
         if recognizer.state == .ended { rightClick() }
+    }
+
+    @objc private func toggleToolbarVisibility(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        let shouldShow = toolbar.isHidden
+        if shouldShow {
+            toolbar.isHidden = false
+            toolbar.alpha = 0
+            toolbar.transform = CGAffineTransform(scaleX: 0.86, y: 0.86)
+        }
+        UIView.animate(
+            withDuration: 0.18,
+            delay: 0,
+            options: [.beginFromCurrentState, .curveEaseInOut],
+            animations: {
+                self.toolbar.alpha = shouldShow ? 1 : 0
+                self.toolbar.transform = shouldShow ? .identity : CGAffineTransform(scaleX: 0.86, y: 0.86)
+            },
+            completion: { _ in
+                self.toolbar.isHidden = !shouldShow
+                if !shouldShow { self.toolbar.transform = .identity }
+            }
+        )
+        UISelectionFeedbackGenerator().selectionChanged()
     }
 
     @objc private func scrollMouse(_ recognizer: UIPanGestureRecognizer) {
@@ -1252,34 +1347,25 @@ private final class PauseOverlayView: UIView {
 }
 
 private final class CDLibraryViewController: UITableViewController {
-    var onAdd: (() -> Void)?
-    var onMount: ((URL) -> Void)?
-    var onPrevious: (() -> Void)?
-    var onNext: (() -> Void)?
-    var onEject: (() -> Void)?
+    var onAdd: ((Int?) -> Void)?
+    var onMount: ((URL, Int) -> Void)?
+    var onEject: ((Int) -> Void)?
     var onDelete: ((URL) -> Void)?
-    var onReorder: (([URL]) -> Void)?
     var onDismiss: (() -> Void)?
 
-    private enum CurrentAction {
-        case status
-        case previous(Int)
-        case next(Int)
-        case eject
-    }
-
     private var images: [URL]
-    private var activeURL: URL?
+    private var activeURLs: [URL?]
     private var busy = false
+    private let driveLetters = ["D", "E", "F"]
     private let byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter
     }()
 
-    init(images: [URL], activeURL: URL?) {
+    init(images: [URL], activeURLs: [URL?]) {
         self.images = images
-        self.activeURL = activeURL
+        self.activeURLs = activeURLs
         super.init(style: .insetGrouped)
     }
 
@@ -1287,14 +1373,7 @@ private final class CDLibraryViewController: UITableViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "CD-ROM"
-        let addButton = UIBarButtonItem(
-            barButtonSystemItem: .add,
-            target: self,
-            action: #selector(addImage)
-        )
-        addButton.accessibilityLabel = "CDイメージを追加"
-        navigationItem.leftBarButtonItems = [addButton, editButtonItem]
+        title = "CD/DVDドライブ"
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .done,
             target: self,
@@ -1303,11 +1382,10 @@ private final class CDLibraryViewController: UITableViewController {
         tableView.allowsSelection = true
     }
 
-    func reload(images: [URL], activeURL: URL?, busy: Bool) {
+    func reload(images: [URL], activeURLs: [URL?], busy: Bool) {
         self.images = images
-        self.activeURL = activeURL
+        self.activeURLs = activeURLs
         self.busy = busy
-        navigationItem.leftBarButtonItems?.forEach { $0.isEnabled = !busy }
         tableView.isUserInteractionEnabled = !busy
         tableView.alpha = busy ? 0.6 : 1
         if busy {
@@ -1316,7 +1394,7 @@ private final class CDLibraryViewController: UITableViewController {
             navigationItem.titleView = spinner
         } else {
             navigationItem.titleView = nil
-            title = "CD-ROM"
+            title = "CD/DVDドライブ"
         }
         tableView.reloadData()
     }
@@ -1324,17 +1402,19 @@ private final class CDLibraryViewController: UITableViewController {
     override func numberOfSections(in tableView: UITableView) -> Int { 2 }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        if section == 0 { return currentActions.count }
+        if section == 0 { return activeURLs.count }
         return images.count + 1
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        section == 0 ? "現在のCD-ROM" : "インストールディスク（順番）"
+        section == 0 ? "仮想CD/DVDドライブ" : "保存済みCDイメージ"
     }
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        guard section == 1 else { return nil }
-        return "複数枚を一度に追加できます。順番を並べ替え、前／次のディスクへWindowsを動かしたまま交換できます。"
+        if section == 0 {
+            return "D:・E:・F:へ最大3枚を同時に挿入できます。ドライブをタップすると、そのドライブのCDを変更または取り出せます。"
+        }
+        return "複数枚をまとめて追加できます。イメージをタップすると挿入先のドライブを選べます。"
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -1342,52 +1422,42 @@ private final class CDLibraryViewController: UITableViewController {
         cell.textLabel?.numberOfLines = 1
 
         if indexPath.section == 0 {
-            switch currentActions[indexPath.row] {
-            case .status:
-                if let activeURL {
-                    cell.textLabel?.text = activeURL.lastPathComponent
-                    if let index = images.firstIndex(of: activeURL) {
-                        cell.detailTextLabel?.text = "ディスク \(index + 1) / \(images.count) — D: にマウント中"
-                    } else {
-                        cell.detailTextLabel?.text = "D: にマウント中"
-                    }
-                    cell.imageView?.image = UIImage(systemName: "opticaldisc.fill")
-                } else {
-                    cell.textLabel?.text = "ディスクなし"
-                    cell.detailTextLabel?.text = "保存済みイメージを選択してください"
-                    cell.imageView?.image = UIImage(systemName: "opticaldisc")
-                }
-                cell.selectionStyle = .none
-            case .previous(let number):
-                cell.textLabel?.text = "前のディスク（ディスク \(number)）"
-                cell.imageView?.image = UIImage(systemName: "backward.end.fill")
-            case .next(let number):
-                cell.textLabel?.text = "次のディスク（ディスク \(number)）"
-                cell.imageView?.image = UIImage(systemName: "forward.end.fill")
-            case .eject:
-                cell.textLabel?.text = "CDを取り出す"
-                cell.textLabel?.textColor = activeURL == nil ? .secondaryLabel : .systemRed
-                cell.imageView?.image = UIImage(systemName: "eject.fill")
-                cell.selectionStyle = activeURL == nil ? .none : .default
-            }
+            let letter = driveLetters[indexPath.row]
+            let activeURL = activeURLs[indexPath.row]
+            cell.textLabel?.text = "CD/DVDドライブ (\(letter):)"
+            cell.detailTextLabel?.text = activeURL?.lastPathComponent ?? "何も挿入されていません"
+            cell.imageView?.image = UIImage(systemName: activeURL == nil ? "externaldrive" : "externaldrive.fill")
+            cell.accessoryType = .disclosureIndicator
+            cell.accessibilityHint = "ダブルタップして、このドライブのCDを設定します"
             return cell
         }
 
         if indexPath.row == 0 {
             cell.textLabel?.text = "CDイメージを追加…"
+            cell.detailTextLabel?.text = "複数のISOなどをまとめて選べます"
             cell.textLabel?.textColor = view.tintColor
-            cell.imageView?.image = UIImage(systemName: "plus.circle.fill")
+            cell.imageView?.image = UIImage(systemName: "doc.badge.plus")
             return cell
         }
 
         let imageURL = images[indexPath.row - 1]
-        cell.textLabel?.text = "ディスク \(indexPath.row): \(imageURL.lastPathComponent)"
+        cell.textLabel?.text = imageURL.lastPathComponent
+        let mountedLetters = activeURLs.enumerated().compactMap { index, mountedURL in
+            mountedURL == imageURL ? "\(driveLetters[index]):" : nil
+        }
         if let size = try? imageURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
             let sizeText = byteFormatter.string(fromByteCount: Int64(size))
-            cell.detailTextLabel?.text = imageURL == activeURL ? "\(sizeText) — マウント中" : sizeText
+            cell.detailTextLabel?.text = mountedLetters.isEmpty
+                ? "\(sizeText) — タップして挿入先を選択"
+                : "\(sizeText) — \(mountedLetters.joined(separator: ", ")) に挿入中"
+        } else {
+            cell.detailTextLabel?.text = mountedLetters.isEmpty
+                ? "タップして挿入先を選択"
+                : "\(mountedLetters.joined(separator: ", ")) に挿入中"
         }
-        cell.imageView?.image = UIImage(systemName: "opticaldisc")
-        cell.accessoryType = imageURL == activeURL ? .checkmark : .none
+        cell.imageView?.image = UIImage(systemName: mountedLetters.isEmpty ? "opticaldisc" : "opticaldisc.fill")
+        cell.accessoryType = .disclosureIndicator
+        cell.accessibilityHint = "ダブルタップして挿入先のドライブを選びます"
         return cell
     }
 
@@ -1395,18 +1465,11 @@ private final class CDLibraryViewController: UITableViewController {
         tableView.deselectRow(at: indexPath, animated: true)
         guard !busy else { return }
         if indexPath.section == 0 {
-            switch currentActions[indexPath.row] {
-            case .previous(_): onPrevious?()
-            case .next(_): onNext?()
-            case .eject:
-                if activeURL != nil { onEject?() }
-            case .status: break
-            }
+            presentDriveMenu(driveIndex: indexPath.row, source: tableView.cellForRow(at: indexPath))
         } else if indexPath.row == 0 {
-            onAdd?()
+            onAdd?(nil)
         } else {
-            let url = images[indexPath.row - 1]
-            if url != activeURL { onMount?(url) }
+            presentDestinationMenu(for: images[indexPath.row - 1], source: tableView.cellForRow(at: indexPath))
         }
     }
 
@@ -1414,56 +1477,71 @@ private final class CDLibraryViewController: UITableViewController {
         !busy && indexPath.section == 1 && indexPath.row > 0
     }
 
-    override func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool {
-        !busy && indexPath.section == 1 && indexPath.row > 0
-    }
-
-    override func tableView(
-        _ tableView: UITableView,
-        targetIndexPathForMoveFromRowAt sourceIndexPath: IndexPath,
-        toProposedIndexPath proposedDestinationIndexPath: IndexPath
-    ) -> IndexPath {
-        guard proposedDestinationIndexPath.section == 1 else {
-            return IndexPath(row: 1, section: 1)
-        }
-        return IndexPath(row: max(1, proposedDestinationIndexPath.row), section: 1)
-    }
-
-    override func tableView(
-        _ tableView: UITableView,
-        moveRowAt sourceIndexPath: IndexPath,
-        to destinationIndexPath: IndexPath
-    ) {
-        let moved = images.remove(at: sourceIndexPath.row - 1)
-        let destination = min(max(0, destinationIndexPath.row - 1), images.count)
-        images.insert(moved, at: destination)
-        onReorder?(images)
-        DispatchQueue.main.async { [weak self] in self?.tableView.reloadData() }
-    }
-
     override func tableView(
         _ tableView: UITableView,
         commit editingStyle: UITableViewCell.EditingStyle,
         forRowAt indexPath: IndexPath
     ) {
-        guard editingStyle == .delete, indexPath.section == 1, indexPath.row > 0 else { return }
+        guard editingStyle == .delete, indexPath.section == 1, images.indices.contains(indexPath.row - 1) else { return }
         onDelete?(images[indexPath.row - 1])
     }
 
-    @objc private func addImage() { if !busy { onAdd?() } }
     @objc private func dismissLibrary() { onDismiss?() }
 
-    private var currentActions: [CurrentAction] {
-        var actions: [CurrentAction] = [.status]
-        if let activeURL, let index = images.firstIndex(of: activeURL) {
-            if index > 0 { actions.append(.previous(index)) }
-            if index + 1 < images.count { actions.append(.next(index + 2)) }
+    private func presentDriveMenu(driveIndex: Int, source: UIView?) {
+        guard activeURLs.indices.contains(driveIndex) else { return }
+        let letter = driveLetters[driveIndex]
+        let alert = UIAlertController(
+            title: "CD/DVDドライブ (\(letter):)",
+            message: activeURLs[driveIndex]?.lastPathComponent ?? "何も挿入されていません",
+            preferredStyle: .actionSheet
+        )
+        for image in images {
+            let action = UIAlertAction(title: image.lastPathComponent, style: .default) { [weak self] _ in
+                self?.onMount?(image, driveIndex)
+            }
+            action.isEnabled = activeURLs[driveIndex] != image
+            alert.addAction(action)
         }
-        // Keep the control in a stable location even while no media is
-        // mounted or its library URL cannot be matched after Files changes.
-        // It becomes active as soon as activeURL reports mounted media.
-        actions.append(.eject)
-        return actions
+        alert.addAction(UIAlertAction(title: "新しいCDイメージを追加…", style: .default) { [weak self] _ in
+            self?.onAdd?(driveIndex)
+        })
+        if activeURLs[driveIndex] != nil {
+            alert.addAction(UIAlertAction(title: "このドライブから取り出す", style: .destructive) { [weak self] _ in
+                self?.onEject?(driveIndex)
+            })
+        }
+        alert.addAction(UIAlertAction(title: "キャンセル", style: .cancel))
+        configurePopover(for: alert, source: source)
+        present(alert, animated: true)
+    }
+
+    private func presentDestinationMenu(for image: URL, source: UIView?) {
+        let alert = UIAlertController(
+            title: "挿入先を選択",
+            message: image.lastPathComponent,
+            preferredStyle: .actionSheet
+        )
+        for driveIndex in activeURLs.indices {
+            let currentName = activeURLs[driveIndex]?.lastPathComponent ?? "空"
+            let action = UIAlertAction(
+                title: "\(driveLetters[driveIndex]):（\(currentName)）",
+                style: .default
+            ) { [weak self] _ in
+                self?.onMount?(image, driveIndex)
+            }
+            action.isEnabled = activeURLs[driveIndex] != image
+            alert.addAction(action)
+        }
+        alert.addAction(UIAlertAction(title: "キャンセル", style: .cancel))
+        configurePopover(for: alert, source: source)
+        present(alert, animated: true)
+    }
+
+    private func configurePopover(for alert: UIAlertController, source: UIView?) {
+        guard let popover = alert.popoverPresentationController else { return }
+        popover.sourceView = source ?? view
+        popover.sourceRect = source?.bounds ?? CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
     }
 }
 

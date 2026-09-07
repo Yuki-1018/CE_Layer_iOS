@@ -66,7 +66,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch pinned emulator core
         run: scripts/fetch_core.sh
-      - name: Test audio buffering, Win9x CPU segment limits, persistence and multi-disc ATAPI swaps
+      - name: Test audio, Win9x CPU, persistence and three simultaneous ATAPI CD drives
         run: bash scripts/test_core_storage.sh
       - name: Test optional bundled IMG, VHD and FFDD save preparation
         run: bash scripts/test_bundled_disk.sh
