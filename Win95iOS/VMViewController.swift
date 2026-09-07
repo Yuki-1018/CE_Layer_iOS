@@ -839,9 +839,14 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         bridge.sendKey(RetroKey.leftSuper, pressed: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             guard let self, self.bridge.isRunning, !self.bridge.isPaused else { return }
-            self.keyboardCapture.sendASCIIText(SharedFolderServer.guestURL)
-            self.bridge.sendKey(RetroKey.enter, pressed: true)
-            self.bridge.sendKey(RetroKey.enter, pressed: false)
+            self.keyboardCapture.sendASCIIText(SharedFolderServer.guestURL) { [weak self] in
+                guard let self, self.bridge.isRunning, !self.bridge.isPaused else { return }
+                self.bridge.sendKey(RetroKey.enter, pressed: true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+                    guard let self, self.bridge.isRunning, !self.bridge.isPaused else { return }
+                    self.bridge.sendKey(RetroKey.enter, pressed: false)
+                }
+            }
         }
     }
 

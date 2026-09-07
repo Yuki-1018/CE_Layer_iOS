@@ -177,6 +177,11 @@ final class PhysicalKeyboardInput {
 }
 
 final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
+    private struct TimedKeyEvent {
+        let key: UInt32
+        let pressed: Bool
+    }
+
     var sendKey: ((UInt32, Bool) -> Void)? {
         didSet { accessory.sendKey = sendKey }
     }
@@ -232,6 +237,14 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
     }
 
     private func sendASCII(_ ascii: UInt8) {
+        let mapped = mappedASCII(ascii)
+        let synthesizeShift = mapped.shift && !accessory.isModifierActive(RetroKey.leftShift) && !accessory.isModifierActive(RetroKey.rightShift)
+        if synthesizeShift { sendKey?(RetroKey.leftShift, true) }
+        tap(mapped.key)
+        if synthesizeShift { sendKey?(RetroKey.leftShift, false) }
+    }
+
+    private func mappedASCII(_ ascii: UInt8) -> (key: UInt32, shift: Bool) {
         var key = UInt32(ascii)
         var shift = false
         if ascii >= 65 && ascii <= 90 { key = UInt32(ascii + 32); shift = true }
@@ -242,15 +255,45 @@ final class KeyboardCaptureView: UITextField, UITextFieldDelegate {
             key = UInt32(Array(unshifted.utf8)[offset])
             shift = true
         }
-        let synthesizeShift = shift && !accessory.isModifierActive(RetroKey.leftShift) && !accessory.isModifierActive(RetroKey.rightShift)
-        if synthesizeShift { sendKey?(RetroKey.leftShift, true) }
-        tap(key)
-        if synthesizeShift { sendKey?(RetroKey.leftShift, false) }
+        return (key, shift)
     }
 
-    func sendASCIIText(_ string: String) {
+    func sendASCIIText(
+        _ string: String,
+        eventInterval: TimeInterval = 0.025,
+        completion: (() -> Void)? = nil
+    ) {
         accessory.releaseModifiers()
-        for byte in string.utf8 where byte < 128 { sendASCII(byte) }
+        var events: [TimedKeyEvent] = []
+        for byte in string.utf8 where byte < 128 {
+            let mapped = mappedASCII(byte)
+            if mapped.shift {
+                events.append(TimedKeyEvent(key: RetroKey.leftShift, pressed: true))
+            }
+            events.append(TimedKeyEvent(key: mapped.key, pressed: true))
+            events.append(TimedKeyEvent(key: mapped.key, pressed: false))
+            if mapped.shift {
+                events.append(TimedKeyEvent(key: RetroKey.leftShift, pressed: false))
+            }
+        }
+        sendTimedKeyEvents(events, at: 0, interval: eventInterval, completion: completion)
+    }
+
+    private func sendTimedKeyEvents(
+        _ events: [TimedKeyEvent],
+        at index: Int,
+        interval: TimeInterval,
+        completion: (() -> Void)?
+    ) {
+        guard index < events.count else {
+            completion?()
+            return
+        }
+        let event = events[index]
+        sendKey?(event.key, event.pressed)
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
+            self?.sendTimedKeyEvents(events, at: index + 1, interval: interval, completion: completion)
+        }
     }
 
     private func tap(_ key: UInt32) {
