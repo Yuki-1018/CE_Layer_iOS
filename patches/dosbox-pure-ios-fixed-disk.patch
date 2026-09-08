@@ -121,7 +121,7 @@ index ec99bf3..b898680 100644
  	#ifndef DBP_STANDALONE
  	enum retro_pixel_format pixel_format = RETRO_PIXEL_FORMAT_XRGB8888;
  	if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &pixel_format))
-@@ -3377,6 +3392,73 @@ void retro_reset(void)
+@@ -3377,6 +3392,85 @@ void retro_reset(void)
  		input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)));
  }
  
@@ -167,6 +167,18 @@ index ec99bf3..b898680 100644
 +	DBP_ThreadControl(TCM_RESUME_FRAME);
 +}
 +
++extern "C" bool dbp_win95_export_merged_disk(const char* path)
++{
++	if (!path || !*path || dbp_state == DBPSTATE_BOOT || dbp_state == DBPSTATE_SHUTDOWN || dbp_state == DBPSTATE_EXITED)
++		return false;
++	DBP_ThreadControl(TCM_PAUSE_FRAME);
++	imageDisk* disk = imageDiskList['C'-'A'];
++	if (disk) disk->FlushDifferencingDisk();
++	const bool success = disk && disk->ExportToFile(path, false);
++	DBP_ThreadControl(TCM_RESUME_FRAME);
++	return success;
++}
++
 +extern "C" bool dbp_win95_guest_shutdown(void)
 +{
 +	return dbp_win95_poweroff_requested.load();
@@ -195,7 +207,7 @@ index ec99bf3..b898680 100644
  void retro_run_touchpad(bool has_press, Bit16s absx, Bit16s absy)
  {
  	static Bit8u last_presses, down_btn, is_move, is_tap;
-@@ -3446,7 +3528,7 @@ void retro_run(void)
+@@ -3446,7 +3540,7 @@ void retro_run(void)
  	static Bit8u fpsboost_count = 0, last_fpsboost = 1;
  	Bit8u next_fpsboost = 1, fpsboost = 1;
  	extern bool dbp_net_connected;
@@ -1122,7 +1134,7 @@ index 661eba0..58b1faa 100644
  		return 0x00;
  	}
  
-@@ -1335,7 +1369,26 @@ void imageDisk::SetDifferencingDisk(const char* savePath)
+@@ -1335,5 +1369,24 @@ void imageDisk::SetDifferencingDisk(const char* savePath)
  	if (discard) { delete discard; discard = NULL; }
  	if (differencing) delete differencing;
  	differencing = new differencingDisk();
@@ -1148,5 +1160,91 @@ index 661eba0..58b1faa 100644
 +		fsync(fileno(differencing->saveFile));
 +	}
  }
- 
+@@ -1341,20 +1394,70 @@
  bool imageDisk::ExportToFile(const char* path, bool vhd_format)
+ {
+-	if (sector_size > 512) return false; // unsupported here
+-	FILE* f = fopen_wrap(path, "wb");
+-	if (!f) return false;
+-
+-	const Bit32u totalsectors = heads * cylinders * sectors, sectsize = sector_size;
+-	const Bit32u onlyzeroafter = ((ffdd && ffdd->difference.diffSectors.empty()) ? ffdd->sect_files_end : totalsectors);
+-	if (!vhd_format)
+-	{
+-		for (Bit32u i = 0; i != onlyzeroafter; i++) { Bit8u data[512]; Read_AbsoluteSector(i, data); fwrite(data, sectsize, 1, f); }
+-		if (onlyzeroafter != totalsectors) fseek_wrap(f, (Bit64s)totalsectors * sectsize, SEEK_CUR);
+-	}
+-	else
+-	{
+-		sparseVhd::Export(this, f, totalsectors, onlyzeroafter, heads, cylinders, sectors);
+-	}
+-	fclose(f);
+-	return true;
++	if (sector_size > 512) return false; // unsupported here
++	FILE* f = fopen_wrap(path, "wb");
++	if (!f) return false;
++
++	// CHS geometry is rounded down for many raw images. Use the actual backing
++	// capacity so an exported migration image does not silently lose its tail.
++	Bit64u capacity = (Bit64u)heads * cylinders * sectors;
++	if (vhd)
++	{
++		// Dynamic VHD logical size is authoritative; its container and CHS sizes
++		// are independent and must not be used as readable-sector bounds.
++		capacity = vhd->total_sectors;
++	}
++	else if (dos_file)
++	{
++		Bit64u file_size = 0;
++		if (!dos_file->Seek64(&file_size, DOS_SEEK_END) || file_size % sector_size) { fclose(f); remove(path); return false; }
++		dos_file->Seek64(&current_fpos, DOS_SEEK_SET);
++		Bit64u file_sectors = file_size / sector_size;
++		if (file_sectors >= 0xFFFFFFFFULL) { fclose(f); remove(path); return false; }
++		// A fixed VHD is otherwise exposed by DOSBox Pure as a raw disk. Its final
++		// 512-byte footer is container metadata, not part of the guest disk.
++		if (sector_size == 512 && file_sectors)
++		{
++			sparseVhd::VHDFooter footer;
++			differencingDisk* overlay = differencing;
++			differencing = NULL;
++			const Bit8u read_result = Read_AbsoluteSector((Bit32u)(file_sectors - 1), &footer);
++			differencing = overlay;
++			if (!read_result && !memcmp(footer.cookie, "conectix", 8) &&
++				VHD_READ_BE32(footer.disk_type) == 2 &&
++				VHD_READ_BE64(footer.current_size) == (file_sectors - 1) * 512)
++				file_sectors--;
++		}
++		capacity = std::max(capacity, file_sectors);
++	}
++	if (!capacity || capacity >= 0xFFFFFFFFULL) { fclose(f); remove(path); return false; }
++
++	const Bit32u totalsectors = (Bit32u)capacity, sectsize = sector_size;
++	const Bit32u onlyzeroafter = std::min(
++		((ffdd && ffdd->difference.diffSectors.empty()) ? ffdd->sect_files_end : totalsectors),
++		totalsectors);
++	bool success = true;
++	if (!vhd_format)
++	{
++		const Bit32u sectors_per_chunk = std::max<Bit32u>(1, (1024 * 1024) / sectsize);
++		std::vector<Bit8u> data((size_t)sectors_per_chunk * sectsize);
++		for (Bit32u first = 0; success && first != onlyzeroafter;)
++		{
++			const Bit32u count = std::min(sectors_per_chunk, onlyzeroafter - first);
++			for (Bit32u i = 0; i != count; ++i)
++				if (Read_AbsoluteSector(first + i, &data[(size_t)i * sectsize])) { success = false; break; }
++			if (success && fwrite(data.data(), sectsize, count, f) != count) success = false;
++			first += count;
++		}
++		if (success && onlyzeroafter != totalsectors &&
++			(fseek_wrap(f, (Bit64s)totalsectors * sectsize - 1, SEEK_SET) || fputc(0, f) == EOF))
++			success = false;
++	}
++	else
++	{
++		sparseVhd::Export(this, f, totalsectors, onlyzeroafter, heads, cylinders, sectors);
++	}
++	if (success && (ferror(f) || fflush(f) || fsync(fileno(f)))) success = false;
++	if (fclose(f)) success = false;
++	if (!success) remove(path);
++	return success;
+ }

@@ -26,6 +26,7 @@
 #include <vector>
 
 extern "C" void dbp_win95_flush_disk(void);
+extern "C" bool dbp_win95_export_merged_disk(const char* path);
 extern "C" bool dbp_win95_guest_shutdown(void);
 extern "C" void dbp_win95_send_key(unsigned keycode, bool pressed);
 extern "C" void dbp_win95_release_input(void);
@@ -49,7 +50,7 @@ static NSString * const Win95CoreErrorDomain = @"Win95Core";
 
 namespace {
 
-enum class PendingOperation { None, Flush, SaveSuspend, LoadSuspend, ReleaseInput, MountCD, EjectCD };
+enum class PendingOperation { None, Flush, ExportMergedDisk, SaveSuspend, LoadSuspend, ReleaseInput, MountCD, EjectCD };
 
 struct KeyEvent {
     unsigned keyCode;
@@ -504,6 +505,11 @@ static int NetworkGetPollEvents(int index, void *opaque) {
     [self enqueueOperation:Operation{PendingOperation::Flush, {}, [completion copy]}];
 }
 
+- (void)exportMergedDiskToURL:(NSURL *)url completion:(Win95Completion)completion {
+    if (!_running.load()) { [self finishOperation:completion error:CoreError(8, @"The virtual machine is not running.")]; return; }
+    [self enqueueOperation:Operation{PendingOperation::ExportMergedDisk, url.fileSystemRepresentation, [completion copy]}];
+}
+
 - (void)mountCDAtURL:(NSURL *)url driveIndex:(NSUInteger)driveIndex completion:(Win95Completion)completion {
     if (!_running.load()) { [self finishOperation:completion error:CoreError(8, @"The virtual machine is not running.")]; return; }
     [self enqueueOperation:Operation{PendingOperation::MountCD, url.fileSystemRepresentation, [completion copy], (unsigned)driveIndex}];
@@ -538,6 +544,13 @@ static int NetworkGetPollEvents(int index, void *opaque) {
         switch (operation.kind) {
             case PendingOperation::Flush:
                 dbp_win95_flush_disk();
+                break;
+            case PendingOperation::ExportMergedDisk:
+                if (_stopRequested.load()) {
+                    error = CoreError(8, @"The virtual machine is stopping.");
+                } else if (!dbp_win95_export_merged_disk(operation.path.c_str())) {
+                    error = CoreError(10, @"統合HDDイメージを書き出せませんでした。空き容量とファイルアクセス権を確認してください。不完全な出力は削除されました。");
+                }
                 break;
             case PendingOperation::SaveSuspend:
                 dbp_win95_flush_disk();

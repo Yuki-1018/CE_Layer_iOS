@@ -24,6 +24,7 @@
 extern "C" bool dbp_win95_disk_ready();
 extern "C" int dbp_win95_change_cd(unsigned, const char*);
 extern "C" void dbp_win95_flush_disk();
+extern "C" bool dbp_win95_export_merged_disk(const char*);
 extern "C" void dbp_win95_set_nat_active(bool);
 const char* DBP_CPU_GetDecoderName();
 static std::string directory;
@@ -155,6 +156,13 @@ int main(int argc, char** argv) {
                 check(!d->Read_AbsoluteSector(101, sector.data()) && sector == expected, "overlay survives reopen");
                 check(!d->Read_AbsoluteSector(32767, sector.data()) && sector == expected, "tail LBA survives reopen");
                 expected.fill(0x77); check(!d->Read_AbsoluteSector(100, sector.data()) && sector == expected, "base survives reopen");
+                const std::string mergedPath = directory + "/merged-" + ext + ".img";
+                check(d->ExportToFile(mergedPath.c_str(), false), "merge base and overlay into raw image");
+                const std::vector<unsigned char> merged = readFile(mergedPath);
+                check(merged.size() == raw.size(), "merged image preserves exact logical capacity");
+                check(merged[100 * 512] == 0x77, "merged image contains unchanged base sector");
+                check(merged[101 * 512] == 0xA3 && merged[32767 * 512] == 0xA3,
+                      "merged image contains overlay sectors including CHS tail");
             }
             std::vector<unsigned char> damaged = {'F','F','D','D',1};
             overlayRecord(damaged, 101, 0xA3); overlayRecord(damaged, 0xFFFFFFFE, 0xCC);
@@ -223,6 +231,9 @@ int main(int argc, char** argv) {
               "Win9x compatibility uses segment-aware normal CPU interpreter");
         for (int i = 0; i < 300 && !dbp_win95_disk_ready(); ++i) retro_run();
         check(dbp_win95_disk_ready(), "BIOS/IDE ready");
+        const std::string liveExport = directory + "/live-merged.img";
+        check(dbp_win95_export_merged_disk(liveExport.c_str()), "live merged HDD export entry point");
+        check(readFile(liveExport).size() == fat.size(), "live merged HDD export size");
         std::vector<unsigned char> iso(64 * 2048);
         memcpy(iso.data() + 16 * 2048, "\1CD001\1", 7);
         std::fill(iso.begin() + 20 * 2048, iso.begin() + 21 * 2048, 0x5A);
@@ -281,7 +292,7 @@ int main(int argc, char** argv) {
         check(CDROM_Interface_Image::images[25]->ReadSector(restoredCD.data(), false, 20) && restoredCD[0] == 0x5A, "CD readable after suspend restore");
         netpacket.poll(); netpacket.stop(); dbp_win95_set_nat_active(false);
         dbp_win95_flush_disk(); retro_unload_game(); retro_deinit();
-        puts("PASS: audio buffering, Win9x segment-limit compatibility, networking, storage recovery and three-drive CD mount/swap/eject");
+        puts("PASS: audio buffering, Win9x compatibility, networking, merged-disk export, storage recovery and three-drive CD mount/swap/eject");
         return 0;
     } catch (const std::exception& e) { fprintf(stderr, "FAIL: %s\n", e.what()); std::_Exit(1); }
 }

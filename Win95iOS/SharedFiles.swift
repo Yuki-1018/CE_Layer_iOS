@@ -501,6 +501,7 @@ final class SharedFilesViewController: UITableViewController {
     var onOpenInWindows: (() -> Void)?
     var onShare: ((URL, UIView?) -> Void)?
     var onDelete: ((URL) -> Void)?
+    var onExportMergedDisk: (() -> Void)?
     var onDismiss: (() -> Void)?
 
     private var files: [URL]
@@ -522,7 +523,7 @@ final class SharedFilesViewController: UITableViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "共有ファイル"
+        title = "ファイル共有・移行"
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .done,
             target: self,
@@ -536,13 +537,14 @@ final class SharedFilesViewController: UITableViewController {
         self.busy = busy
         tableView.isUserInteractionEnabled = !busy
         tableView.alpha = busy ? 0.6 : 1
+        navigationItem.rightBarButtonItem?.isEnabled = !busy
         if busy {
             let spinner = UIActivityIndicatorView(style: .medium)
             spinner.startAnimating()
             navigationItem.titleView = spinner
         } else {
             navigationItem.titleView = nil
-            title = "共有ファイル"
+            title = "ファイル共有・移行"
         }
         tableView.reloadData()
     }
@@ -550,18 +552,18 @@ final class SharedFilesViewController: UITableViewController {
     override func numberOfSections(in tableView: UITableView) -> Int { 2 }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        section == 0 ? 3 : files.count
+        section == 0 ? 4 : files.count
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        section == 0 ? "接続と追加" : "Sharedフォルダ"
+        section == 0 ? "接続・追加・移行" : "Sharedフォルダ"
     }
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         guard section == 0 else {
             return files.isEmpty ? "共有ファイルはまだありません。" : "タップするとiOSの共有メニューを開きます。左スワイプで削除できます。"
         }
-        return "Windows 95のInternet Explorerで上のアドレスを開きます。一覧からiOSのファイルを取得でき、ページ下部から1 GBまでのWindowsファイルをアップロードできます。NE2000とTCP/IPの設定が必要です。"
+        return "Windows 95のInternet Explorerで上のアドレスを開きます。一覧からiOSのファイルを取得でき、ページ下部から1 GBまでのWindowsファイルをアップロードできます。NE2000とTCP/IPの設定が必要です。統合IMGはWin9x/Exportsにも保存されます。"
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -576,11 +578,17 @@ final class SharedFilesViewController: UITableViewController {
             cell.detailTextLabel?.text = "Win+Rへアドレスを自動入力します"
             cell.textLabel?.textColor = view.tintColor
             cell.imageView?.image = UIImage(systemName: "rectangle.portrait.and.arrow.right")
-        } else if indexPath.section == 0 {
+        } else if indexPath.section == 0, indexPath.row == 2 {
             cell.textLabel?.text = "Filesから共有フォルダへ追加…"
             cell.detailTextLabel?.text = "複数のファイルを選択できます"
             cell.textLabel?.textColor = view.tintColor
             cell.imageView?.image = UIImage(systemName: "doc.badge.plus")
+        } else if indexPath.section == 0 {
+            cell.textLabel?.text = "移行用の統合HDDを作成…"
+            cell.detailTextLabel?.text = "ベースIMG/VHDとsavを単体のraw IMGへ統合"
+            cell.textLabel?.textColor = view.tintColor
+            cell.imageView?.image = UIImage(systemName: "externaldrive.badge.checkmark")
+            cell.accessoryType = .disclosureIndicator
         } else {
             let file = files[indexPath.row]
             cell.textLabel?.text = file.lastPathComponent
@@ -603,8 +611,10 @@ final class SharedFilesViewController: UITableViewController {
             present(alert, animated: true)
         } else if indexPath.section == 0, indexPath.row == 1 {
             onOpenInWindows?()
-        } else if indexPath.section == 0 {
+        } else if indexPath.section == 0, indexPath.row == 2 {
             onAdd?()
+        } else if indexPath.section == 0 {
+            onExportMergedDisk?()
         } else {
             onShare?(files[indexPath.row], tableView.cellForRow(at: indexPath))
         }

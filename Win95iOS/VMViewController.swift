@@ -32,6 +32,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var resumeAfterForeground = false
     private var pauseGeneration = 0
     private var isChangingCD = false
+    private var isExportingDisk = false
     private weak var pauseButton: UIButton?
     private weak var cdLibraryController: CDLibraryViewController?
     private weak var sharedFilesController: SharedFilesViewController?
@@ -57,6 +58,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     private var systemDirectory: URL { supportDirectory.appendingPathComponent("System", isDirectory: true) }
     private var cdDirectory: URL { supportDirectory.appendingPathComponent("CDs", isDirectory: true) }
     private var sharedDirectory: URL { supportDirectory.appendingPathComponent("Shared", isDirectory: true) }
+    private var exportsDirectory: URL { supportDirectory.appendingPathComponent("Exports", isDirectory: true) }
     private var suspendStateURL: URL { savesDirectory.appendingPathComponent("automatic-suspend.state") }
     private let selectedCDKey = "SelectedCDImageName"
     private let selectedCDsKey = "SelectedCDImageNamesByDrive"
@@ -169,6 +171,14 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         try? FileManager.default.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: cdDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: sharedDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: exportsDirectory, withIntermediateDirectories: true)
+        if let unfinished = try? FileManager.default.contentsOfDirectory(
+            at: exportsDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for url in unfinished where url.pathExtension == "partial" { try? fileManager.removeItem(at: url) }
+        }
         try? FileManager.default.removeItem(at: suspendStateURL.appendingPathExtension("partial"))
     }
 
@@ -976,6 +986,7 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
         }
         controller.onShare = { [weak self] url, source in self?.shareSharedFile(url, source: source) }
         controller.onDelete = { [weak self] url in self?.confirmDeleteSharedFile(url) }
+        controller.onExportMergedDisk = { [weak self] in self?.confirmExportMergedDisk() }
         controller.onDismiss = { [weak self] in self?.dismiss(animated: true) }
         sharedFilesController = controller
 
@@ -1034,7 +1045,95 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
     }
 
     private func refreshSharedFiles(busy: Bool) {
-        sharedFilesController?.reload(files: storedSharedFiles, serverStatus: sharedServerStatus, busy: busy)
+        sharedFilesController?.reload(files: storedSharedFiles, serverStatus: sharedServerStatus, busy: busy || isExportingDisk)
+    }
+
+    private func confirmExportMergedDisk() {
+        guard let presenter = sharedFilesController, bridge.isRunning, !isChangingCD, !isExportingDisk else {
+            showError(NSError(
+                domain: "Win95UI",
+                code: 15,
+                userInfo: [NSLocalizedDescriptionKey: "Windowsが起動してCD交換などの処理が終わってから、もう一度実行してください。"]
+            ))
+            return
+        }
+        let alert = UIAlertController(
+            title: "現在のHDDを統合しますか？",
+            message: "ベースイメージとSaves内の差分を統合した、他の仮想マシンへ移行できるraw IMGを新しく作成します。元のHDDとsavは変更しません。HDD全容量ぶんの空き領域が必要です。完了までアプリを画面に表示したままにしてください。",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "キャンセル", style: .cancel))
+        alert.addAction(UIAlertAction(title: "統合IMGを作成", style: .default) { [weak self] _ in
+            self?.exportMergedDisk()
+        })
+        presenter.present(alert, animated: true)
+    }
+
+    private func exportMergedDisk() {
+        guard bridge.isRunning, !isExportingDisk else { return }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        let destination = exportsDirectory
+            .appendingPathComponent("win-merged-\(formatter.string(from: Date()))")
+            .appendingPathExtension("img")
+        let temporary = destination.appendingPathExtension("partial")
+        do {
+            try FileManager.default.createDirectory(at: exportsDirectory, withIntermediateDirectories: true)
+            try? FileManager.default.removeItem(at: temporary)
+        } catch {
+            showError(error)
+            return
+        }
+
+        let wasPaused = bridge.isPaused
+        if !wasPaused {
+            keyboardCapture.dismissKeyboard()
+            keyboardCapture.releaseModifiers()
+            physicalKeyboard.releaseAll()
+            touchDragActive = false
+            bridge.setLeftMouseButton(false)
+            bridge.setRightMouseButton(false)
+            audio.stop()
+            bridge.setEmulationPaused(true)
+        }
+        isExportingDisk = true
+        sharedFilesController?.isModalInPresentation = true
+        sharedFilesController?.navigationController?.isModalInPresentation = true
+        refreshSharedFiles(busy: true)
+        bridge.exportMergedDisk(to: temporary) { [weak self] error in
+            guard let self else { return }
+            var finalError: Error? = error
+            if finalError == nil {
+                do {
+                    try FileManager.default.moveItem(at: temporary, to: destination)
+                } catch {
+                    finalError = error
+                }
+            }
+            if finalError != nil { try? FileManager.default.removeItem(at: temporary) }
+
+            self.isExportingDisk = false
+            self.sharedFilesController?.isModalInPresentation = false
+            self.sharedFilesController?.navigationController?.isModalInPresentation = false
+            self.refreshSharedFiles(busy: false)
+            if !wasPaused {
+                if UIApplication.shared.applicationState == .active {
+                    self.resumeAfterForeground = false
+                    self.bridge.setEmulationPaused(false)
+                    self.startAudioIfNeeded()
+                } else {
+                    self.resumeAfterForeground = true
+                }
+            }
+            self.updatePausedAppearance(saving: false)
+
+            if let finalError {
+                self.showError(finalError)
+            } else {
+                self.shareSharedFile(destination, source: nil)
+            }
+        }
     }
 
     private func shareSharedFile(_ url: URL, source: UIView?) {
@@ -1481,6 +1580,10 @@ final class VMViewController: UIViewController, UIDocumentPickerDelegate, UIGest
 
     @objc private func appWillEnterForeground() {
         guard bridge.isRunning else { return }
+        if isExportingDisk {
+            resumeAfterForeground = true
+            return
+        }
         if resumeAfterForeground {
             resumeAfterForeground = false
             bridge.setEmulationPaused(false)
