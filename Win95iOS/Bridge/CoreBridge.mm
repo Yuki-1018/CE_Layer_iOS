@@ -606,9 +606,9 @@ static int NetworkGetPollEvents(int index, void *opaque) {
     // NSData retains the shared C++ buffer until Metal has synchronously copied
     // it into a texture. This removes the former second full-frame CPU copy.
     const auto retainedVideo = video;
-    frame.data = [NSData dataWithBytesNoCopy:video->data()
-                                      length:video->size()
-                                 deallocator:^(__unused void *bytes, __unused NSUInteger length) {
+    frame.data = [[NSData alloc] initWithBytesNoCopy:video->data()
+                                               length:video->size()
+                                          deallocator:^(__unused void *bytes, __unused NSUInteger length) {
         (void)retainedVideo;
     }];
     return frame;
