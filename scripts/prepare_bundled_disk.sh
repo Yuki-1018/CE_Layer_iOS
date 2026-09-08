@@ -41,10 +41,10 @@ if [[ "$DISK_FORMAT" == vhd && "$VHD_COOKIE_HEX" != 636f6e6563746978 ]]; then
 fi
 
 mkdir -p "$BUNDLE_DIR"
-DESTINATION="$BUNDLE_DIR/win95-base.$DISK_FORMAT"
+DESTINATION="$BUNDLE_DIR/win-base.$DISK_FORMAT"
 OTHER_FORMAT=img
 if [[ "$DISK_FORMAT" == img ]]; then OTHER_FORMAT=vhd; fi
-OTHER_DESTINATION="$BUNDLE_DIR/win95-base.$OTHER_FORMAT"
+OTHER_DESTINATION="$BUNDLE_DIR/win-base.$OTHER_FORMAT"
 if [[ -e "$OTHER_DESTINATION" ]]; then
   echo "Another bundled HDD already exists: $OTHER_DESTINATION" >&2
   exit 1

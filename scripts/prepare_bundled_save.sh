@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 path/to/win95-base-CDRIVE.sav" >&2
+  echo "Usage: $0 path/to/win-base-CDRIVE.sav" >&2
   exit 2
 fi
 
@@ -39,7 +39,7 @@ if (( (SAVE_SIZE - 5) % 516 != 0 )); then
 fi
 
 mkdir -p "$BUNDLE_DIR"
-DESTINATION="$BUNDLE_DIR/win95-base-CDRIVE.sav"
+DESTINATION="$BUNDLE_DIR/win-base-CDRIVE.sav"
 if [[ "$SOURCE_SAVE" != "$DESTINATION" ]]; then
   cp "$SOURCE_SAVE" "$DESTINATION"
 fi

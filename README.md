@@ -12,7 +12,7 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 - raw `.img` / `.vhd` の BIOS 自動起動（DOSBox Pure のスタートメニューを表示しない）
 - 初回起動時やベースイメージ未配置時に表示する、iPhone横向きにも対応したイメージ選択画面
 - 512-byte sector 単位の永続 differencing disk
-- base HDD は変更せず、変更 sector のみ `win95-base-CDRIVE.sav` に保存
+- base HDD は変更せず、変更 sector のみ `win-base-CDRIVE.sav` に保存
 - Metal による XRGB8888 framebuffer 表示
 - AVAudioEngine による 48 kHz stereo PCM出力（固定長リングバッファ、起動・アンダーラン時のプリバッファとクリック抑制フェード）
 - NE2000からlibslirpへ接続するDHCP/DNS付きuser-mode NAT
@@ -35,8 +35,8 @@ Windows 95/98/MeはMicrosoftの著作物であり、このリポジトリには�
 選択肢は2つです。
 
 1. 初回起動時に表示されるセットアップ画面から `.img` または `.vhd` を Files picker で選ぶ（推奨）。イメージは「このiPhone/iPad内」→アプリ名→`Win9x` へコピーされます。後からベースイメージを削除した場合も、次回起動時に同じ画面へ戻ります。
-2. GitHub Actionsの `hdd_image_url` へHTTPSダウンロードURLを指定し、IPAへ直接同梱する。raw IMGとVHDに対応し、`hdd_image_sha256` の指定を推奨します。対応する差分ディスクも同梱する場合は `hdd_save_url` に `win95-base-CDRIVE.sav` のURLを指定します。
-3. 自分専用のprivate fork / local checkoutで `Win95iOS/BundledContent/win95-base.img` または `.vhd` を置いてからビルドする。差分ディスクも仕込む場合は同じ場所へ `win95-base-CDRIVE.sav` という名前で置きます。これらは `.gitignore` 対象なので、誤って公開しないよう注意してください。
+2. GitHub Actionsの `hdd_image_url` へHTTPSダウンロードURLを指定し、IPAへ直接同梱する。raw IMGとVHDに対応し、`hdd_image_sha256` の指定を推奨します。対応する差分ディスクも同梱する場合は `hdd_save_url` に `win-base-CDRIVE.sav` のURLを指定します。
+3. 自分専用のprivate fork / local checkoutで `Win95iOS/BundledContent/win-base.img` または `.vhd` を置いてからビルドする。差分ディスクも仕込む場合は同じ場所へ `win-base-CDRIVE.sav` という名前で置きます。これらは `.gitignore` 対象なので、誤って公開しないよう注意してください。
 
 推奨 guest 設定:
 
@@ -50,7 +50,7 @@ Windows 95/98/MeはMicrosoftの著作物であり、このリポジトリには�
 イメージの簡易検査:
 
 ```bash
-scripts/validate_disk.sh path/to/win95-base.img
+scripts/validate_disk.sh path/to/win-base.img
 ```
 
 ## GitHub Actions
@@ -66,7 +66,7 @@ scripts/validate_disk.sh path/to/win95-base.img
 
 HDD URLを空欄にすれば従来どおり初回起動時にFiles pickerが表示されます。同梱したベースHDDは初回起動時にDocumentsへ展開され、「ファイル」Appの「このiPhone/iPad内」→アプリ名→`Win9x` から確認・置換できます。Windowsによる書き込みはDocuments内の差分保存データへ記録され、ベースHDD自体は変更されません。ベースHDDを手動編集・置換するときは、破損を避けるため先にアプリを完全に終了してください。`.sav` も指定した場合はFFDDヘッダーとレコード境界を検査し、同梱HDDを初めて使う時だけDocumentsへコピーして、その続きから永続保存します。`.sav` は必ず指定したベースHDDから作られたものを使用してください。完了後、Artifact `Win95iOS-unsigned` からIPAを取得できます。
 
-DocumentsにベースHDDがまだない場合だけ同梱HDDを展開するため、「ファイル」Appで置換したイメージが次回起動時に上書きされることはありません。ベースHDDのサイズと5地点の64 KiBサンプルから識別子を作り、別のWindowsイメージへ変わった場合は旧 `.sav` と一時停止状態を新しいHDDへ適用しません。旧データは `Saves/` 内の `.previous-base-image-*` または初回移行時の `.unverified-base-image-*` へ退避され、削除されません。
+DocumentsにベースHDDがまだない場合だけ同梱HDDを展開するため、「ファイル」Appで置換したイメージが次回起動時に上書きされることはありません。ベースHDDのサイズと5地点の64 KiBサンプルから識別子を作り、識別済みのHDDが別のWindowsイメージへ変わった場合は旧 `.sav` と一時停止状態を新しいHDDへ適用しません。旧データは `Saves/` 内の `.previous-base-image-*` へ退避され、削除されません。旧バージョンからの更新で識別情報がまだない場合は、同梱savより既存savを優先します。
 
 IPAビルドの前にLinux上で合成IMG/VHD/ISOを使った回帰テストを実行します。音声のプリバッファ・アンダーラン復帰、Normal CPU interpreterとセグメント境界キャッシュ、netpacket callbackの登録・開始・停止、FAT16からの起動、差分の永続化、CHSの末尾を超えるLBA、不正セクタと途中書き込みからの復旧、512MB ISOの交換・メモリ使用量、D:・E:・F:への3枚同時接続、ドライブ別eject、リセットと一時停止復元後のCD読み出しを確認します。Windows本体を使用する実機テストは別途必要です。
 
@@ -115,18 +115,20 @@ iOS 側の主な保存先:
 
 ```text
 Files > このiPhone/iPad内 > アプリ名 > Win9x/
-├── win95-base.img / .vhd       # Files pickerから取り込み、または同梱HDDを初回展開
+├── win-base.img / .vhd         # Files pickerから取り込み、または同梱HDDを初回展開
 ├── CDs/
 │   ├── install-disc-1.iso
 │   └── install-disc-2.iso
 ├── Shared/                       # iOS・Windows間の共有ファイル
 ├── Saves/
-│   ├── win95-base-CDRIVE.sav   # 変更 sector のみ
+│   ├── win-base-CDRIVE.sav     # 変更 sector のみ
 │   └── automatic-suspend.state # 一時停止中だけ保持する自動復帰状態
 └── System/
 ```
 
-このフォルダはファイルアプリから参照・編集できます。旧バージョンの `Documents/Win95` と `Application Support/Win95` は初回起動時に `Documents/Win9x` へ移動します。アプリ実行中にファイルを置換すると破損する可能性があるため、ベースイメージや保存データを編集するときはアプリを終了してください。
+このフォルダはファイルアプリから参照・編集できます。旧バージョンの `Documents/Win95` と `Application Support/Win95` は初回起動時に `Documents/Win9x` へ移動し、旧HDD名 `win95-base.img/.vhd` と旧保存名 `win95-base-CDRIVE*.sav` も `win-base` で始まる名前へ自動変更します。アプリ実行中にファイルを置換すると破損する可能性があるため、ベースイメージや保存データを編集するときはアプリを終了してください。`win-base.img` と `win-base.vhd` の両方がある場合は、誤ったHDDでの起動を防ぐため、どちらかを移動するまで起動しません。
+
+アプリを上書きアップデートした場合は、`Documents/Win9x` にある既存HDD・sav・一時停止状態を優先します。更新後のIPAにHDDやsavが同梱されていても既存ファイルには上書きせず、同梱データは対応するユーザーデータが存在しない初回セットアップ時だけ展開します。ベースHDDが実際に別イメージへ置換されていた場合に限り、対応しない旧savを `Saves/` 内へ名前を変えて退避してから新しい保存領域を作ります。
 
 通常の reset / power cycle でも overlay は維持されます。Windowsの書き込みはbackground移行時と正常終了時にも明示的にflushされます。
 

@@ -213,10 +213,10 @@ jobs:
           done
           if [[ -n "$HDD_IMAGE_URL" ]]; then
             find build/DerivedData/Build/Products/Release-iphoneos/Win95iOS.app/BundledContent \
-              -maxdepth 1 -type f \( -name 'win95-base.img' -o -name 'win95-base.vhd' \) | grep -q .
+              -maxdepth 1 -type f \( -name 'win-base.img' -o -name 'win-base.vhd' \) | grep -q .
           fi
           if [[ -n "$HDD_SAVE_URL" ]]; then
-            test -f build/DerivedData/Build/Products/Release-iphoneos/Win95iOS.app/BundledContent/win95-base-CDRIVE.sav
+            test -f build/DerivedData/Build/Products/Release-iphoneos/Win95iOS.app/BundledContent/win-base-CDRIVE.sav
           fi
           mkdir -p build/Payload
           cp -R build/DerivedData/Build/Products/Release-iphoneos/Win95iOS.app build/Payload/

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 path/to/win95-base.img" >&2
+  echo "Usage: $0 path/to/win-base.img" >&2
   exit 2
 fi
 
@@ -23,4 +23,3 @@ if (( size % 512 != 0 )); then
 fi
 
 echo "Disk image looks structurally valid: $size bytes ($((size / 512)) sectors)."
-
