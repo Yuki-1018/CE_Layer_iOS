@@ -1,5 +1,6 @@
 #import "CoreBridge.h"
 #import "SlirpBridge.h"
+#include "AdaptiveCycleController.hpp"
 #include "AudioRingBuffer.hpp"
 
 #include <libretro.h>
@@ -13,6 +14,7 @@
 #include <deque>
 #include <fcntl.h>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <poll.h>
 #include <string>
@@ -150,12 +152,15 @@ static void CoreLog(enum retro_log_level level, const char *format, ...) {
     std::atomic_int _wheelDown;
 
     std::mutex _videoMutex;
-    std::vector<uint8_t> _video;
+    std::shared_ptr<std::vector<uint8_t>> _video;
     NSInteger _videoWidth;
     NSInteger _videoHeight;
     NSInteger _videoPitch;
     double _videoAspectRatio;
     uint64_t _videoGeneration;
+
+    std::atomic_bool _variablesUpdated;
+    AdaptiveCycleController _cycleController;
 
     AudioRingBuffer _audio;
 
@@ -283,13 +288,20 @@ static int NetworkGetPollEvents(int index, void *opaque) {
         _videoWidth = _videoHeight = _videoPitch = 0;
         _videoAspectRatio = 4.0 / 3.0;
         _videoGeneration = 0;
+        _video = std::make_shared<std::vector<uint8_t>>();
+        _variablesUpdated = false;
         _slirp = nullptr;
         memset(&_networkCallbacks, 0, sizeof(_networkCallbacks));
         _saveDirectory = saveDirectory.fileSystemRepresentation;
         _systemDirectory = systemDirectory.fileSystemRepresentation;
         NSString *configuredCycles = [NSBundle.mainBundle objectForInfoDictionaryKey:@"Win9xCPUCycles"];
         NSInteger cycleCount = configuredCycles.integerValue;
-        if (cycleCount < 315 || cycleCount > 500000) cycleCount = 77000;
+        if (cycleCount < AdaptiveCycleController::kMinimumCycles ||
+            cycleCount > AdaptiveCycleController::kMaximumCycles) cycleCount = 120000;
+        NSInteger learnedCycles = [NSUserDefaults.standardUserDefaults integerForKey:@"Win9xAdaptiveCPUCycles"];
+        if (learnedCycles >= AdaptiveCycleController::kMinimumCycles &&
+            learnedCycles <= AdaptiveCycleController::kMaximumCycles) cycleCount = learnedCycles;
+        _cycleController.reset(static_cast<int>(cycleCount));
         const std::string cycleOption = std::to_string(cycleCount);
         _options = {
             {"dosbox_pure_force60fps", "true"},
@@ -299,10 +311,9 @@ static int NetworkGetPollEvents(int index, void *opaque) {
             {"dosbox_pure_menu_time", "0"},
             {"dosbox_pure_mouse_input", "true"},
             {"dosbox_pure_mouse_speed_factor", "1.0"},
-            // A fixed clock avoids AUTO's large cycle swings while Win9x is
-            // switching between protected mode and a virtual DOS machine.
-            // The Actions guest profile selects 77000 for Windows 95 or
-            // 100000 for Windows 98/Me without enabling AUTO cycle swings.
+            // Keep a numeric clock for stable protected/VM86 transitions. The
+            // frontend adjusts it gradually from measured frame cost instead
+            // of DOSBox AUTO's abrupt guest-workload-based swings.
             {"dosbox_pure_cycles", cycleOption},
             {"dosbox_pure_cycles_max", cycleOption},
             {"dosbox_pure_machine", "svga"},
@@ -395,9 +406,23 @@ static int NetworkGetPollEvents(int index, void *opaque) {
                     retro_reset();
                 }
                 if (!_paused.load()) {
+                    const auto workStart = Clock::now();
                     [self processKeyEvents];
                     [self pollNetwork];
                     retro_run();
+                    const uint64_t workNanoseconds = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - workStart).count()
+                    );
+                    if (const int adjustedCycles = _cycleController.observe(workNanoseconds)) {
+                        const std::string adjustedOption = std::to_string(adjustedCycles);
+                        _options["dosbox_pure_cycles"] = adjustedOption;
+                        _options["dosbox_pure_cycles_max"] = adjustedOption;
+                        _variablesUpdated = true;
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [NSUserDefaults.standardUserDefaults setInteger:adjustedCycles
+                                                                     forKey:@"Win9xAdaptiveCPUCycles"];
+                        });
+                    }
                     if (!started && dbp_win95_disk_ready()) {
                         started = true;
                         [self finishOperation:completion error:nil];
@@ -552,22 +577,37 @@ static int NetworkGetPollEvents(int index, void *opaque) {
 }
 
 - (Win95VideoFrame *)latestVideoFrameAfterGeneration:(uint64_t)generation {
-    std::lock_guard<std::mutex> lock(_videoMutex);
-    if (_video.empty() || generation == _videoGeneration) return nil;
-    Win95VideoFrame *frame = [Win95VideoFrame new];
-    frame.data = [NSData dataWithBytes:_video.data() length:_video.size()];
-    frame.width = _videoWidth;
-    frame.height = _videoHeight;
-    frame.bytesPerRow = _videoPitch;
-    frame.aspectRatio = _videoAspectRatio;
-    frame.generation = _videoGeneration;
+    std::shared_ptr<std::vector<uint8_t>> video;
+    Win95VideoFrame *frame;
+    {
+        std::lock_guard<std::mutex> lock(_videoMutex);
+        if (!_video || _video->empty() || generation == _videoGeneration) return nil;
+        video = _video;
+        frame = [Win95VideoFrame new];
+        frame.width = _videoWidth;
+        frame.height = _videoHeight;
+        frame.bytesPerRow = _videoPitch;
+        frame.aspectRatio = _videoAspectRatio;
+        frame.generation = _videoGeneration;
+    }
+    // NSData retains the shared C++ buffer until Metal has synchronously copied
+    // it into a texture. This removes the former second full-frame CPU copy.
+    const auto retainedVideo = video;
+    frame.data = [NSData dataWithBytesNoCopy:video->data()
+                                      length:video->size()
+                                 deallocator:^(__unused void *bytes, __unused NSUInteger length) {
+        (void)retainedVideo;
+    }];
     return frame;
 }
 
 - (void)receiveVideo:(const void *)data width:(unsigned)width height:(unsigned)height pitch:(size_t)pitch {
     std::lock_guard<std::mutex> lock(_videoMutex);
-    _video.resize(pitch * height);
-    memcpy(_video.data(), data, _video.size());
+    if (!_video || _video.use_count() != 1) {
+        _video = std::make_shared<std::vector<uint8_t>>();
+    }
+    _video->resize(pitch * height);
+    memcpy(_video->data(), data, _video->size());
     _videoWidth = width;
     _videoHeight = height;
     _videoPitch = pitch;
@@ -790,7 +830,7 @@ static int NetworkGetPollEvents(int index, void *opaque) {
             return found != _options.end();
         }
         case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
-            *(bool *)data = false; return true;
+            *(bool *)data = _variablesUpdated.exchange(false); return true;
         case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
             return *(retro_pixel_format *)data == RETRO_PIXEL_FORMAT_XRGB8888;
         case RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK:
@@ -815,10 +855,13 @@ static int NetworkGetPollEvents(int index, void *opaque) {
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY:
-        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK:
         case RETRO_ENVIRONMENT_SET_MEMORY_MAPS:
         case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
             return true;
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK:
+            // We do not retain or invoke the callback. Returning false makes
+            // DOSBox Pure poll GET_VARIABLE_UPDATE once per frame instead.
+            return false;
         case RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE:
             [self startNetworkWithCallbacks:static_cast<const retro_netpacket_callback *>(data)];
             return _slirp != nullptr;

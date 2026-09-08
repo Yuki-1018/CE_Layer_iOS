@@ -7,7 +7,7 @@ GitHub Actions は arm64/iPhoneOS 向けのソフトウェアインタープリ�
 ## 実装済み
 
 - DOSBox Pure の x86 interpreter を固定コミットからビルド（JIT/dynarec 無効）
-- Pentium (`pentium_slow`)、128 MB、4 MB S3 Trio64、SB16の固定構成。Windows 95は77000、Windows 98/Meは100000 fixed cyclesを使用
+- Pentium (`pentium_slow`)、128 MB、4 MB S3 Trio64、SB16の固定構成。120000 cyclesから開始し、実測負荷を基に50000〜200000の範囲で滑らかに自動調整・端末別に学習
 - Windows 95 OSR2のウィンドウDOSとWindows 98/Meセットアップ向けに、ゼロ長セグメントのGeneral Protection例外とVM86セグメントキャッシュ初期化をNormal interpreterへ移植
 - raw `.img` / `.vhd` の BIOS 自動起動（DOSBox Pure のスタートメニューを表示しない）
 - 初回起動時やベースイメージ未配置時に表示する、iPhone横向きにも対応したイメージ選択画面
@@ -57,7 +57,7 @@ scripts/validate_disk.sh path/to/win-base.img
 
 `Actions` → `Build unsigned IPA` → `Run workflow` を実行します。実行画面ではアプリ名、bundle ID、カスタムアイコンURLに加えて次を指定できます。
 
-- `guest_profile`: `windows95`（77000 cycles）/ `windows98` / `windowsme`（後者2つは100000 cycles）
+- `guest_profile`: `windows95` / `windows98` / `windowsme`。どの選択でも120000 cyclesから開始し、端末性能に合わせて50000〜200000の範囲で自動調整します。Windows 95から98/Meへ上書きアップグレードしたHDDも再設定不要です
 - `hdd_image_url`: 任意。正当に所有するセットアップ済み・未圧縮IMG/VHDファイルへの直接HTTPS URL。最大4 GiB
 - `hdd_image_format`: `auto` / `img` / `vhd`。`auto`はVHD footerを検出し、それ以外をraw IMGとして扱います
 - `hdd_image_sha256`: 任意ですが指定推奨。ダウンロード破損や別ファイルへの差し替わりを検出します

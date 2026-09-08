@@ -15,8 +15,10 @@ fi
 
 JOBS="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 4)"
 make -C "$CORE_DIR" -j"$JOBS" \
+  BUILD=RELEASE \
   platform=ios-arm64 \
   STATIC_LINKING=1 \
+  MAKE_CPUFLAGS="-O3" \
   OUTNAME=libdosbox_pure.a \
   AR="$(xcrun --sdk iphoneos -f ar)"
 

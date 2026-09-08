@@ -251,7 +251,7 @@
 				SWIFT_OBJC_BRIDGING_HEADER = Win95iOS/Bridge/Win95iOS-Bridging-Header.h;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				WIN9X_CPU_CYCLES = 77000;
+				WIN9X_CPU_CYCLES = 120000;
 			};
 			name = Debug;
 		};
@@ -288,7 +288,8 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;
-				WIN9X_CPU_CYCLES = 77000;
+				GCC_OPTIMIZATION_LEVEL = 3;
+				WIN9X_CPU_CYCLES = 120000;
 			};
 			name = Release;
 		};

@@ -7,6 +7,7 @@
 #include "../src/dos/cdrom.h"
 #include "libretro.h"
 #include "../Win95iOS/Bridge/AudioRingBuffer.hpp"
+#include "../Win95iOS/Bridge/AdaptiveCycleController.hpp"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -105,6 +106,18 @@ int main(int argc, char** argv) {
             check(audioQueue.availableFrames() == 2, "underrun preserves producer tail");
             audioQueue.write(input.data(), 2);
             check(audioQueue.read(output.data(), 4) == 4, "audio resumes after re-prime");
+        }
+        {
+            AdaptiveCycleController cycles;
+            cycles.reset(77000); // A Windows 95 profile later upgraded to 98/Me.
+            int faster = 0;
+            for (size_t i = 0; i < AdaptiveCycleController::kSampleFrames; ++i)
+                faster = cycles.observe(8000000);
+            check(faster > 77000, "adaptive cycles accelerate an upgraded Win95 profile");
+            int slower = 0;
+            for (size_t i = 0; i < AdaptiveCycleController::kSampleFrames; ++i)
+                slower = cycles.observe(18000000);
+            check(slower > 0 && slower < faster, "adaptive cycles retain real-time headroom");
         }
         std::vector<unsigned char> raw(16 * 1024 * 1024);
         raw[0] = 0xEB; raw[1] = 0xFE; raw[510] = 0x55; raw[511] = 0xAA; // boot: jmp $

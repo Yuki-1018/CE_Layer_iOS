@@ -139,8 +139,7 @@ jobs:
             exit 1
           fi
           case "$GUEST_PROFILE" in
-            windows95) echo "WIN9X_CPU_CYCLES=77000" >> "$GITHUB_ENV" ;;
-            windows98|windowsme) echo "WIN9X_CPU_CYCLES=100000" >> "$GITHUB_ENV" ;;
+            windows95|windows98|windowsme) echo "WIN9X_CPU_CYCLES=120000" >> "$GITHUB_ENV" ;;
             *) echo "Unknown guest profile: $GUEST_PROFILE" >&2; exit 1 ;;
           esac
 
